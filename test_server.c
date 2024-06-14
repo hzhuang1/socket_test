@@ -18,6 +18,8 @@
 #include <gnutls/gnutls.h>
 #include <gnutls/dtls.h>
 
+#include "cert.h"
+
 #define PORT 8443
 #define CERTIFICATE_FILE "server.crt"
 #define PRIVATE_KEY_FILE "server.key"
@@ -38,15 +40,21 @@ int create_socket(void)
 
 	bzero((char *) &server_addr, sizeof(server_addr));
 	server_addr.sin_family = AF_INET;
+#if 1
 	server_addr.sin_addr.s_addr = INADDR_ANY;
 	server_addr.sin_port = htons(PORT);
+#else
+	server_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	server_addr.sin_port = htons(PORT);
+#endif
 
 	if (bind(sockfd, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
 		perror("bind failed");
 		exit(EXIT_FAILURE);
 	}
 
-	if (listen(sockfd, 5) < 0) {
+	//if (listen(sockfd, 5) < 0) {
+	if (listen(sockfd, 1) < 0) {
 		perror("listen");
 		exit(EXIT_FAILURE);
 	}
@@ -415,7 +423,7 @@ int ssl_send_file(void)
 	OpenSSL_add_all_algorithms();
 	SSL_load_error_strings();
 
-	ctx = SSL_CTX_new(TLS_server_method());
+	ctx = SSL_CTX_new(TLSv1_2_server_method());
 	if (ctx == NULL) {
 		ERR_print_errors_fp(stderr);
 		exit(EXIT_FAILURE);
@@ -468,10 +476,18 @@ int ssl_send_file(void)
 		buf_sz = BUF_SIZE;
 	else
 		buf_sz = st.st_size;
-	bytes_sent = sendfile(new_socket, file_fd, NULL, buf_sz);
-	if (bytes_sent < 0)
-		perror("SSL_write");
-	else
+	printf("ktls send:%d, ktls recv:%d\n",
+		BIO_get_ktls_send(SSL_get_wbio(ssl)),
+		BIO_get_ktls_recv(SSL_get_rbio(ssl)));
+	bytes_sent = SSL_sendfile(ssl, file_fd, 0, buf_sz, 0);
+	printf("bytes_sent:%ld\n", bytes_sent);
+	//bytes_sent = sendfile(new_socket, file_fd, NULL, buf_sz);
+	if (bytes_sent < 0) {
+		int ssl_error;
+		//perror("SSL_write");
+		ssl_error = SSL_get_error(ssl, bytes_sent);
+		printf("SSL_read ret:%d(%d, %d)\n", bytes_sent, ssl_error, SSL_ERROR_SYSCALL);
+	} else
 		printf("Sent %zd bytes\n", bytes_sent);
 
 	// 清理和关闭
@@ -686,28 +702,24 @@ int gnutls_anon_send(void)
 }
 
 // TODO: fix handshake issue
-int gnutls_cert_send(void)
+int gnutls_cert_send(const char *prio)
 {
 	int server_fd, new_socket;
 	int file_fd;
 	struct stat st;
-	//off_t offset = 0;
 	ssize_t bytes_sent;
 	int ret;
-	//struct tls12_crypto_info_aes_gcm_128 crypto_info;
-	//gnutls_datum_t mac_key;
-	//gnutls_datum_t iv_read, iv_write;
-	//gnutls_datum_t cipher_key_read, cipher_key_write;
-	//unsigned char seq_number_read[8], seq_number_write[8];
-	//gnutls_dtls_prestate_st prestate;
 	gnutls_certificate_credentials_t x509_cred;
 	gnutls_session_t session;
 
 	gnutls_global_init();
 	gnutls_certificate_allocate_credentials(&x509_cred);
-	gnutls_certificate_set_x509_key_file(x509_cred,
-				CERTIFICATE_FILE, PRIVATE_KEY_FILE,
-				GNUTLS_X509_FMT_PEM);
+	ret = gnutls_certificate_set_x509_key_mem(
+		x509_cred, &server_cert, &server_key, GNUTLS_X509_FMT_PEM);
+	if (ret < 0) {
+		fprintf(stderr, "fail to set x509 key\n");
+		exit(EXIT_FAILURE);
+	}
 
 	server_fd = create_socket();
 
@@ -719,12 +731,25 @@ int gnutls_cert_send(void)
 	}
 
 	gnutls_init(&session, GNUTLS_SERVER);
-	gnutls_transport_set_int(session, new_socket);
+	// no timeout
+	gnutls_handshake_set_timeout(session, 0);
+	ret = gnutls_priority_set_direct(session, prio, NULL);
+	if (ret < 0) {
+		fprintf(stderr, "fail to set priority\n");
+		exit(EXIT_FAILURE);
+	}
+
 	gnutls_credentials_set(session, GNUTLS_CRD_CERTIFICATE, x509_cred);
+	gnutls_transport_set_int(session, new_socket);
 
 	do {
 		ret = gnutls_handshake(session);
 	} while (ret < 0 && gnutls_error_is_fatal(ret) == 0);
+	if (ret < 0) {
+		fprintf(stderr, "fail on server handshake:%s\n",
+			gnutls_strerror(ret));
+		exit(EXIT_FAILURE);
+	}
 
 	file_fd = open("testfile.txt", O_RDONLY);
 	if (file_fd < 0) {
@@ -738,21 +763,22 @@ int gnutls_cert_send(void)
 	}
 
 	{
-		char buffer[1024] = {0};
-		printf("gnutls recv\n");
-		ret = gnutls_record_recv(session, buffer, sizeof(buffer) - 1);
+		char buffer[BUF_SIZE] = { 0 };
+		size_t buf_sz;
+		ssize_t ret;
+		if (st.st_size > BUF_SIZE)
+			buf_sz = BUF_SIZE;
+		else
+			buf_sz = st.st_size;
+		ret = read(file_fd, buffer, sizeof(buffer));
 		if (ret <= 0) {
-			fprintf(stderr, "gnutls_record_recv() failed: %s (%d)\n",
-				gnutls_strerror(ret), ret);
-			ERR_print_errors_fp(stderr);
+			fprintf(stderr, "fail to read\n");
+			exit(EXIT_FAILURE);
+		} else if (ret != (ssize_t)buf_sz) {
+			fprintf(stderr, "unmatched data loaded\n");
 			exit(EXIT_FAILURE);
 		}
-
-		printf("Received: %s\n", buffer);
-	}
-	{
-		char *msg = "Hello from socket server!";
-		bytes_sent = send(new_socket, msg, strlen(msg), 0);
+		bytes_sent = gnutls_record_send(session, buffer, buf_sz);
 		if (bytes_sent < 0) {
 			perror("send");
 		} else {
@@ -767,6 +793,7 @@ int gnutls_cert_send(void)
 	gnutls_deinit(session);
 	gnutls_certificate_free_credentials(x509_cred);
 	gnutls_global_deinit();
+	close(server_fd);
 
 	return 0;
 }
@@ -941,8 +968,8 @@ int socket_send_ssl_enc(void)
 int main(void) {
 	int ret;
 
-	//ret = socket_enc_send();
 	ret = ssl_send_file();
+	//ret = gnutls_cert_send(PRIO_STRING);
 	if (ret)
 		exit(EXIT_FAILURE);
 	return 0;

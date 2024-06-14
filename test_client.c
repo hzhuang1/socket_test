@@ -14,9 +14,13 @@
 #include <linux/tls.h>
 #include <gnutls/gnutls.h>
 
+#include "cert.h"
+
 //#define HOST "localhost"
-#define HOST "172.18.0.2"
-#define PORT "8443" // 假设服务器在4433端口上监听
+//#define HOST "172.18.0.2"
+//#define HOST "172.29.210.156"
+#define HOST "127.0.0.1"
+#define PORT	8443 // 假设服务器在4433端口上监听
 #define KEY_SIZE		EVP_MAX_KEY_LENGTH
 #define IV_SIZE			EVP_MAX_IV_LENGTH
 
@@ -43,7 +47,7 @@ int socket_recv_msg(void)
 	}
 
 	address.sin_family = AF_INET;
-	address.sin_port = htons(atoi(PORT));
+	address.sin_port = htons(PORT);
 	if (inet_pton(AF_INET, HOST, &address.sin_addr) <= 0) {
 		perror("invalid IP address");
 		exit(EXIT_FAILURE);
@@ -98,7 +102,7 @@ int socket_recv_fdata(void)
 	}
 
 	address.sin_family = AF_INET;
-	address.sin_port = htons(atoi(PORT));
+	address.sin_port = htons(PORT);
 	if (inet_pton(AF_INET, HOST, &address.sin_addr) <= 0) {
 		perror("invalid IP address");
 		exit(EXIT_FAILURE);
@@ -175,7 +179,7 @@ int ssl_recv(void)
 
 	address.sin_family = AF_INET;
 	//address.sin_addr.s_addr = INADDR_ANY;
-	address.sin_port = htons(atoi(PORT));
+	address.sin_port = htons(PORT);
 	if (inet_pton(AF_INET, HOST, &address.sin_addr) <= 0) {
 		perror("invalid IP address");
 		exit(EXIT_FAILURE);
@@ -245,7 +249,7 @@ int ssl_recv_fdata(void)
 	OpenSSL_add_all_algorithms();
 	SSL_load_error_strings();
 
-	ctx = SSL_CTX_new(TLS_client_method()); // 使用TLS
+	ctx = SSL_CTX_new(TLSv1_2_client_method()); // 使用TLS
 	if (ctx == NULL) {
 		ERR_print_errors_fp(stderr);
 		exit(EXIT_FAILURE);
@@ -272,7 +276,7 @@ int ssl_recv_fdata(void)
 
 	address.sin_family = AF_INET;
 	//address.sin_addr.s_addr = INADDR_ANY;
-	address.sin_port = htons(atoi(PORT));
+	address.sin_port = htons(PORT);
 	if (inet_pton(AF_INET, HOST, &address.sin_addr) <= 0) {
 		perror("invalid IP address");
 		exit(EXIT_FAILURE);
@@ -302,6 +306,7 @@ int ssl_recv_fdata(void)
 
 	// 接收来自服务器的消息
 	ret = SSL_read(ssl, buffer, sizeof(buffer) - 1);
+	//ret = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
 	if (ret <= 0) {
 		int ssl_error;
 		ssl_error = SSL_get_error(ssl, ret);
@@ -396,7 +401,7 @@ int socket_dec_recv(void)
 
 	address.sin_family = AF_INET;
 	//address.sin_addr.s_addr = INADDR_ANY;
-	address.sin_port = htons(atoi(PORT));
+	address.sin_port = htons(PORT);
 	if (inet_pton(AF_INET, HOST, &address.sin_addr) <= 0) {
 		perror("invalid IP address");
 		exit(EXIT_FAILURE);
@@ -505,7 +510,7 @@ int gnutls_recv(void)
 	}
 
 	address.sin_family = AF_INET;
-	address.sin_port = htons(atoi(PORT));
+	address.sin_port = htons(PORT);
 	if (inet_pton(AF_INET, HOST, &address.sin_addr) <= 0) {
 		perror("invalid IP address");
 		exit(EXIT_FAILURE);
@@ -556,19 +561,19 @@ int gnutls_recv(void)
 	return 0;
 }
 
-int gnutls_cert_recv(void)
+int gnutls_cert_recv(const char *prio)
 {
 	int sockfd, new_socket;
 	struct sockaddr_in address;
 	int opt = 1;
-	char buffer[1024] = {0};
+	char buffer[BUF_SIZE] = {0};
 	const char *message = "Hello from TLS client!";
 	int ret;
-	//struct tls12_crypto_info_aes_gcm_128 crypto_info;
-	//gnutls_certificate_credentials_t x509_cred;
+	gnutls_certificate_credentials_t x509_cred;
 	gnutls_session_t session;
 
 	gnutls_global_init();
+	gnutls_certificate_allocate_credentials(&x509_cred);
 
 	// 创建socket
 	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
@@ -583,11 +588,16 @@ int gnutls_cert_recv(void)
 	}
 
 	address.sin_family = AF_INET;
-	address.sin_port = htons(atoi(PORT));
+#if 1
+	address.sin_port = htons(PORT);
 	if (inet_pton(AF_INET, HOST, &address.sin_addr) <= 0) {
 		perror("invalid IP address");
 		exit(EXIT_FAILURE);
 	}
+#else
+	address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	address.sin_port = htons(PORT);;
+#endif
 
 	// 连接到服务器
 	if (connect(sockfd, (struct sockaddr *)&address, sizeof(address))<0) {
@@ -596,35 +606,49 @@ int gnutls_cert_recv(void)
 	}
 
 	gnutls_init(&session, GNUTLS_CLIENT);
-	gnutls_transport_set_int(session, new_socket);
-	gnutls_set_default_priority(session);
-	gnutls_credentials_set(session, GNUTLS_CRD_CERTIFICATE, NULL);
-
-	ret = gnutls_handshake(session);
+	// no timeout
+	gnutls_handshake_set_timeout(session, 0);
+	ret = gnutls_priority_set_direct(session, prio, NULL);
 	if (ret < 0) {
-		fprintf(stderr, "client handshake failed: %s (%d)\n",
-			gnutls_strerror(ret), ret);
+		fprintf(stderr, "fail to set priority\n");
+		exit(EXIT_FAILURE);
+	}
+	gnutls_credentials_set(session, GNUTLS_CRD_CERTIFICATE, x509_cred);
+	gnutls_transport_set_int(session, new_socket);
+
+	do {
+		ret = gnutls_handshake(session);
+	} while (ret < 0 && gnutls_error_is_fatal(ret) == 0);
+	if (ret < 0) {
+		fprintf(stderr, "fail on client handshake: %s\n",
+			gnutls_strerror(ret));
 		exit(EXIT_FAILURE);
 	}
 
-	// 发送消息到服务器
-	if (gnutls_record_send(session, message, strlen(message)) <= 0) {
-		ERR_print_errors_fp(stderr);
-		exit(EXIT_FAILURE);
-	}
 	printf("waiting server message\n");
 
 	// 接收来自服务器的消息
-	ret = read(sockfd, buffer, sizeof(buffer) - 1);
-	if (ret <= 0) {
-		ERR_print_errors_fp(stderr);
-		exit(EXIT_FAILURE);
+	{
+		char buffer[BUF_SIZE] = {0};
+		printf("gnutls recv\n");
+		ret = gnutls_record_recv(session, buffer, sizeof(buffer));
+		if (ret < 0) {
+			fprintf(stderr, "gnutls_record_recv() failed: %s (%d)\n",
+				gnutls_strerror(ret), ret);
+			ERR_print_errors_fp(stderr);
+			exit(EXIT_FAILURE);
+		}
+
+		printf("Received: %s\n", buffer);
 	}
 
-	printf("Received: %s\n", buffer);
-
+	gnutls_bye(session, GNUTLS_SHUT_RDWR);
 	// 关闭socket
 	close(sockfd);
+
+	gnutls_deinit(session);
+	gnutls_certificate_free_credentials(x509_cred);
+	gnutls_global_deinit();
 
 	return 0;
 }
@@ -632,7 +656,7 @@ int gnutls_cert_recv(void)
 int main() {
 	int ret;
 
-	//ret = socket_dec_recv();
 	ret = ssl_recv_fdata();
+	//ret = gnutls_cert_recv(PRIO_STRING);
 	return ret;
 }
