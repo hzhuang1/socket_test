@@ -453,6 +453,7 @@ int ssl_send_file(void)
 
 	ssl = SSL_new(ctx);
 	SSL_set_fd(ssl, new_socket);
+	SSL_set_options(ssl, SSL_OP_ENABLE_KTLS);
 
 	if (SSL_accept(ssl) <= 0) {
 		ERR_print_errors_fp(stderr);
