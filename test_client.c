@@ -12,9 +12,8 @@
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
 #include <linux/tls.h>
-#include <gnutls/gnutls.h>
 
-#include "cert.h"
+//#include "cert.h"
 
 //#define HOST "localhost"
 //#define HOST "172.18.0.2"
@@ -482,6 +481,7 @@ int socket_dec_recv(void)
 	return 0;
 }
 
+#if 0
 int gnutls_recv(void)
 {
 	int sockfd, new_socket;
@@ -652,6 +652,7 @@ int gnutls_cert_recv(const char *prio)
 
 	return 0;
 }
+#endif
 
 int main() {
 	int ret;

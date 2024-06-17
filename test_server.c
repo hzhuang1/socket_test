@@ -15,10 +15,8 @@
 #include <openssl/ssl.h>
 #include <netinet/tcp.h>
 #include <linux/tls.h>
-#include <gnutls/gnutls.h>
-#include <gnutls/dtls.h>
 
-#include "cert.h"
+//#include "cert.h"
 
 #define PORT 8443
 #define CERTIFICATE_FILE "server.crt"
@@ -621,6 +619,7 @@ int socket_enc_send(void)
 	return 0;
 }
 
+#if 0
 // TODO: test
 int gnutls_anon_send(void)
 {
@@ -908,6 +907,7 @@ int gnutls_ktls_send(void)
 
 	return 0;
 }
+#endif
 
 int socket_send_ssl_enc(void)
 {
