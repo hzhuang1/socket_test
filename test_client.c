@@ -14,6 +14,8 @@
 #include <linux/tls.h>
 
 //#include "cert.h"
+#include "common.h"
+//#include "test_vec.h"
 
 //#define HOST "localhost"
 //#define HOST "172.18.0.2"
@@ -127,6 +129,107 @@ int socket_recv_fdata(void)
 	}
 
 	printf("Received: %s\n", buffer);
+
+	// 关闭socket
+	close(sockfd);
+
+	return 0;
+}
+
+void set_client_crypto_info(uint16_t tls_version, uint16_t cipher_type,
+			    int sockfd)
+{
+	struct tls_crypto_info_keys tls12;
+	int ret;
+
+	tls_crypto_info_init(tls_version, cipher_type, &tls12);
+	//test_vec_init(&tls12, cipher_type);
+
+	// enable TLS
+	ret = setsockopt(sockfd, SOL_TCP, TCP_ULP, "tls", sizeof("tls"));
+	if (ret < 0) {
+		fprintf(stderr, "fail to set TCP_ULP\n");
+		exit(EXIT_FAILURE);
+	}
+	// start TLS
+	ret = setsockopt(sockfd, SOL_TLS, TLS_RX, &tls12, tls12.len);
+	if (ret < 0) {
+		fprintf(stderr, "fail to set TLS_TX\n");
+		exit(EXIT_FAILURE);
+	}
+}
+
+int socket_ktls_recv(uint16_t tls_version, uint16_t cipher_type)
+{
+	int sockfd;
+	struct sockaddr_in address;
+	int opt = 1;
+	char buffer[BUF_SIZE] = {0};
+	struct msghdr msg = {0};
+	struct cmsghdr *cmsg;
+	union {
+		struct cmsghdr hdr;
+		char buf[CMSG_SPACE(sizeof(unsigned char))];
+	} cmsgbuf;
+	struct iovec msg_iov;
+	int ret;
+	unsigned char *p = buffer;
+	const size_t prepend_length = SSL3_RT_HEADER_LENGTH;
+
+	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+		perror("socket failed");
+		exit(EXIT_FAILURE);
+	}
+
+	// 设置socket为非阻塞模式（可选）
+	if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
+		perror("setsockopt");
+		exit(EXIT_FAILURE);
+	}
+
+	address.sin_family = AF_INET;
+	address.sin_port = htons(PORT);
+	if (inet_pton(AF_INET, HOST, &address.sin_addr) <= 0) {
+		perror("invalid IP address");
+		exit(EXIT_FAILURE);
+	}
+
+	if (connect(sockfd, (struct sockaddr *)&address, sizeof(address))<0) {
+		perror("connect failed");
+		exit(EXIT_FAILURE);
+	}
+
+	set_client_crypto_info(tls_version, cipher_type, sockfd);
+#if 0
+	msg.msg_control = cmsgbuf.buf;
+	msg.msg_controllen = sizeof(cmsgbuf.buf);
+	msg_iov.iov_base = p + prepend_length;
+	msg_iov.iov_len = BUF_SIZE - prepend_length - EVP_GCM_TLS_TAG_LEN;
+	msg.msg_iov = &msg_iov;
+	msg.msg_iovlen = 1;
+
+	printf("waiting server message\n");
+
+	// 接收来自服务器的消息
+	ret = recvmsg(sockfd, &msg, 0);
+	if (ret <= 0) {
+		perror("read");
+		exit(EXIT_FAILURE);
+	}
+#else
+	printf("waiting server message\n");
+
+	// 接收来自服务器的消息
+	ret = read(sockfd, buffer, sizeof(buffer) - 1);
+	if (ret <= 0) {
+		ERR_print_errors_fp(stderr);
+		exit(EXIT_FAILURE);
+	}
+#endif
+
+	printf("Received: %s\n", buffer);
+	printf("Received %d bytes\n", ret);
+	dump_buffer_hex(&msg, ret);
 
 	// 关闭socket
 	close(sockfd);
@@ -657,7 +760,6 @@ int gnutls_cert_recv(const char *prio)
 int main() {
 	int ret;
 
-	ret = ssl_recv_fdata();
-	//ret = gnutls_cert_recv(PRIO_STRING);
+	ret = socket_ktls_recv(TLS_1_2_VERSION, TLS_CIPHER_AES_GCM_128);
 	return ret;
 }

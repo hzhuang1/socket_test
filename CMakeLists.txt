@@ -13,8 +13,8 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -g")
 
 # 添加可执行文件
-add_executable(test_server test_server.c)
-add_executable(test_client test_client.c)
+add_executable(test_server test_server.c common.c)
+add_executable(test_client test_client.c common.c)
 
 # 链接OpenSSL库
 target_link_libraries(test_server OpenSSL::SSL OpenSSL::Crypto)

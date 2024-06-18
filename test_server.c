@@ -14,9 +14,11 @@
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <netinet/tcp.h>
-#include <linux/tls.h>
+//#include <linux/tls.h>
 
 //#include "cert.h"
+#include "common.h"
+//#include "test_vec.h"
 
 #define PORT 8443
 #define CERTIFICATE_FILE "server.crt"
@@ -171,6 +173,136 @@ int socket_send_file(void)
 		exit(EXIT_FAILURE);
 	}
 
+	file_fd = open("testfile.txt", O_RDONLY);
+	if (file_fd < 0) {
+		perror("open");
+		exit(EXIT_FAILURE);
+	}
+
+	if (fstat(file_fd, &st) < 0) {
+		perror("fstat");
+		exit(EXIT_FAILURE);
+	}
+
+	if (st.st_size > BUF_SIZE)
+		buf_sz = BUF_SIZE;
+	else
+		buf_sz = st.st_size;
+
+	bytes_sent = sendfile(new_socket, file_fd, NULL, buf_sz);
+	if (bytes_sent < 0) {
+		perror("send");
+	} else {
+		printf("Sent %zd bytes\n", bytes_sent);
+	}
+
+	close(file_fd);
+	close(new_socket);
+	close(server_fd);
+
+	return 0;
+}
+
+void set_server_crypto_info(uint16_t tls_version, uint16_t cipher_type,
+			    int sockfd)
+{
+	struct tls_crypto_info_keys tls12;
+	int ret;
+
+	tls_crypto_info_init(tls_version, cipher_type, &tls12);
+	//test_vec_init(&tls12, cipher_type);
+
+	// enable TLS
+	ret = setsockopt(sockfd, SOL_TCP, TCP_ULP, "tls", sizeof("tls"));
+	if (ret < 0) {
+		perror("set TCP_ULP\n");
+		exit(EXIT_FAILURE);
+	}
+	// start TLS
+	ret = setsockopt(sockfd, SOL_TLS, TLS_TX, &tls12, tls12.len);
+	if (ret < 0) {
+		perror("set TLS_TX");
+		exit(EXIT_FAILURE);
+	}
+}
+
+// basic test
+int tiny_ktls(void)
+{
+	struct tls_crypto_info_keys tls12;
+	char buf[BUF_SIZE] = { 0 }, buf2[BUF_SIZE] = { 0 };
+	struct sockaddr_in addr;
+	int sfd, cfd, ret, fd;
+	socklen_t len;
+
+	len = sizeof(addr);
+	memrnd(buf, sizeof(buf));
+
+	tls_crypto_info_init(TLS_1_2_VERSION, TLS_CIPHER_AES_GCM_256, &tls12);
+
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	addr.sin_port = 0;
+
+	fd = socket(AF_INET, SOCK_STREAM, 0);
+	sfd = socket(AF_INET, SOCK_STREAM, 0);
+
+	if (bind(sfd, &addr, sizeof(addr)) < 0)
+		perror("bind");
+	if (listen(sfd, 10) < 0)
+		perror("listen");
+	if (getsockname(sfd, &addr, &len) < 0)
+		perror("getsockname");
+	if (connect(fd, &addr, sizeof(addr)) < 0)
+		perror("connect");
+	cfd = accept(sfd, &addr, &len);
+	if (cfd < 0)
+		perror("accept");
+	close(sfd);
+
+	ret = setsockopt(fd, IPPROTO_TCP, TCP_ULP, "tls", sizeof("tls"));
+	if (ret)
+		perror("setsockopt tls");
+	ret = setsockopt(fd, SOL_TLS, TLS_TX, &tls12, tls12.len);
+	if (ret < 0)
+		perror("setsockopt TLS_TX");
+	ret = send(fd, buf, sizeof(buf), MSG_DONTWAIT);
+	if (ret != sizeof(buf))
+		perror("send");
+	ret = setsockopt(cfd, IPPROTO_TCP, TCP_ULP, "tls", sizeof("tls"));
+	if (ret < 0)
+		perror("setsockopt TLS_RX");
+	ret = recv(cfd, buf2, sizeof(buf2), MSG_WAITALL);
+	if (ret != sizeof(buf2))
+		perror("recv");
+	if (memcmp(buf, buf2, sizeof(buf)) != 0)
+		perror("memcmp");
+
+	close(fd);
+	close(cfd);
+}
+
+// Work without any configuration on cipher fields
+int socket_ktls_sendfile(uint16_t tls_version, uint16_t cipher_type)
+{
+	int server_fd, new_socket;
+	int file_fd;
+	struct stat st;
+	ssize_t bytes_sent;
+	size_t buf_sz;
+
+	server_fd = create_socket();
+
+	printf("Waiting for a connection...\n");
+
+	if ((new_socket = accept(server_fd, NULL, NULL)) < 0) {
+		perror("accept");
+		exit(EXIT_FAILURE);
+	}
+
+	set_server_crypto_info(tls_version, cipher_type, new_socket);
+
+	sleep(1);
 	file_fd = open("testfile.txt", O_RDONLY);
 	if (file_fd < 0) {
 		perror("open");
@@ -475,7 +607,7 @@ int ssl_send_file(void)
 		buf_sz = BUF_SIZE;
 	else
 		buf_sz = st.st_size;
-	printf("ktls send:%d, ktls recv:%d\n",
+	printf("ktls send:%ld, ktls recv:%ld\n",
 		BIO_get_ktls_send(SSL_get_wbio(ssl)),
 		BIO_get_ktls_recv(SSL_get_rbio(ssl)));
 	bytes_sent = SSL_sendfile(ssl, file_fd, 0, buf_sz, 0);
@@ -485,9 +617,9 @@ int ssl_send_file(void)
 		int ssl_error;
 		//perror("SSL_write");
 		ssl_error = SSL_get_error(ssl, bytes_sent);
-		printf("SSL_read ret:%d(%d, %d)\n", bytes_sent, ssl_error, SSL_ERROR_SYSCALL);
+		printf("SSL_read ret:%ld(%d, %d)\n", bytes_sent, ssl_error, SSL_ERROR_SYSCALL);
 	} else
-		printf("Sent %zd bytes\n", bytes_sent);
+		printf("Sent %ld bytes\n", bytes_sent);
 
 	// 清理和关闭
 	close(file_fd);
@@ -969,7 +1101,8 @@ int socket_send_ssl_enc(void)
 int main(void) {
 	int ret;
 
-	ret = ssl_send_file();
+	//ret = tiny_ktls();
+	ret = socket_ktls_sendfile(TLS_1_2_VERSION, TLS_CIPHER_AES_GCM_128);
 	//ret = gnutls_cert_send(PRIO_STRING);
 	if (ret)
 		exit(EXIT_FAILURE);
