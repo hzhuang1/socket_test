@@ -48,7 +48,7 @@ int create_socket(void)
 	server_addr.sin_port = htons(PORT);
 #endif
 
-	if (bind(sockfd, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
+	if (bind(sockfd, (const struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
 		perror("bind failed");
 		exit(EXIT_FAILURE);
 	}
@@ -210,7 +210,7 @@ void set_server_crypto_info(uint16_t tls_version, uint16_t cipher_type,
 	int ret;
 
 	tls_crypto_info_init(tls_version, cipher_type, &tls12);
-	//test_vec_init(&tls12, cipher_type);
+	test_vec_init(&tls12, cipher_type);
 
 	// enable TLS
 	ret = setsockopt(sockfd, SOL_TCP, TCP_ULP, "tls", sizeof("tls"));
@@ -247,15 +247,15 @@ int tiny_ktls(void)
 	fd = socket(AF_INET, SOCK_STREAM, 0);
 	sfd = socket(AF_INET, SOCK_STREAM, 0);
 
-	if (bind(sfd, &addr, sizeof(addr)) < 0)
+	if (bind(sfd, (const struct sockaddr *)&addr, sizeof(addr)) < 0)
 		perror("bind");
 	if (listen(sfd, 10) < 0)
 		perror("listen");
-	if (getsockname(sfd, &addr, &len) < 0)
+	if (getsockname(sfd, (struct sockaddr *)&addr, &len) < 0)
 		perror("getsockname");
-	if (connect(fd, &addr, sizeof(addr)) < 0)
+	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
 		perror("connect");
-	cfd = accept(sfd, &addr, &len);
+	cfd = accept(sfd, (struct sockaddr *)&addr, &len);
 	if (cfd < 0)
 		perror("accept");
 	close(sfd);

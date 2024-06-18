@@ -143,7 +143,7 @@ void set_client_crypto_info(uint16_t tls_version, uint16_t cipher_type,
 	int ret;
 
 	tls_crypto_info_init(tls_version, cipher_type, &tls12);
-	//test_vec_init(&tls12, cipher_type);
+	test_vec_init(&tls12, cipher_type);
 
 	// enable TLS
 	ret = setsockopt(sockfd, SOL_TCP, TCP_ULP, "tls", sizeof("tls"));
@@ -165,16 +165,7 @@ int socket_ktls_recv(uint16_t tls_version, uint16_t cipher_type)
 	struct sockaddr_in address;
 	int opt = 1;
 	char buffer[BUF_SIZE] = {0};
-	struct msghdr msg = {0};
-	struct cmsghdr *cmsg;
-	union {
-		struct cmsghdr hdr;
-		char buf[CMSG_SPACE(sizeof(unsigned char))];
-	} cmsgbuf;
-	struct iovec msg_iov;
 	int ret;
-	unsigned char *p = buffer;
-	const size_t prepend_length = SSL3_RT_HEADER_LENGTH;
 
 	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
 		perror("socket failed");
@@ -200,36 +191,18 @@ int socket_ktls_recv(uint16_t tls_version, uint16_t cipher_type)
 	}
 
 	set_client_crypto_info(tls_version, cipher_type, sockfd);
-#if 0
-	msg.msg_control = cmsgbuf.buf;
-	msg.msg_controllen = sizeof(cmsgbuf.buf);
-	msg_iov.iov_base = p + prepend_length;
-	msg_iov.iov_len = BUF_SIZE - prepend_length - EVP_GCM_TLS_TAG_LEN;
-	msg.msg_iov = &msg_iov;
-	msg.msg_iovlen = 1;
-
-	printf("waiting server message\n");
-
-	// 接收来自服务器的消息
-	ret = recvmsg(sockfd, &msg, 0);
-	if (ret <= 0) {
-		perror("read");
-		exit(EXIT_FAILURE);
-	}
-#else
 	printf("waiting server message\n");
 
 	// 接收来自服务器的消息
 	ret = read(sockfd, buffer, sizeof(buffer) - 1);
-	if (ret <= 0) {
+	if (ret < 0) {
 		ERR_print_errors_fp(stderr);
 		exit(EXIT_FAILURE);
 	}
-#endif
 
 	printf("Received: %s\n", buffer);
 	printf("Received %d bytes\n", ret);
-	dump_buffer_hex(&msg, ret);
+	dump_buffer_hex(buffer, ret);
 
 	// 关闭socket
 	close(sockfd);

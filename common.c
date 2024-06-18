@@ -39,6 +39,7 @@ void tls_crypto_info_init(uint16_t tls_version, uint16_t cipher_type,
 
 void test_vec_init(struct tls_crypto_info_keys *tls12, uint16_t cipher_type)
 {
+#if 0
 	switch (cipher_type) {
 	case TLS_CIPHER_AES_GCM_128:
 		memcpy(&tls12->aes128.iv, &aes_gcm_tv[0].iv, 12);
@@ -49,6 +50,10 @@ void test_vec_init(struct tls_crypto_info_keys *tls12, uint16_t cipher_type)
 		fprintf(stderr, "unmatched cipher type\n");
 		exit(EXIT_FAILURE);
 	}
+#else
+	(void)tls12;
+	(void)cipher_type;
+#endif
 }
 
 void dump_buffer_hex(void *buf, size_t len)
