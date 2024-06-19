@@ -17,11 +17,13 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -g")
 add_executable(test_server test_server.c common.c)
 add_executable(test_client test_client.c common.c)
 add_executable(hello hello.c common.c)
+add_executable(tls_nonblock tls_nonblock.c common.c)
 
 # 链接OpenSSL库
 target_link_libraries(test_server OpenSSL::SSL OpenSSL::Crypto ${GNUTLS_LIBRARIES})
 target_link_libraries(test_client OpenSSL::SSL OpenSSL::Crypto ${GNUTLS_LIBRARIES})
 target_link_libraries(hello ${GNUTLS_LIBRARIES})
+target_link_libraries(tls_nonblock ${GNUTLS_LIBRARIES})
 
 # 可选：添加安装目标（如果需要）
 # install(TARGETS test_server DESTINATION bin)
