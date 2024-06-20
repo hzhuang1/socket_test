@@ -19,6 +19,7 @@ add_executable(test_client test_client.c common.c)
 add_executable(hello hello.c common.c)
 add_executable(tls_nonblock tls_nonblock.c common.c)
 add_executable(gnutls_ktls gnutls_ktls.c common.c)
+add_executable(perf_test perf_test.c common.c)
 
 # 链接OpenSSL库
 target_link_libraries(test_server OpenSSL::SSL OpenSSL::Crypto ${GNUTLS_LIBRARIES})
@@ -26,6 +27,7 @@ target_link_libraries(test_client OpenSSL::SSL OpenSSL::Crypto ${GNUTLS_LIBRARIE
 target_link_libraries(hello ${GNUTLS_LIBRARIES})
 target_link_libraries(tls_nonblock ${GNUTLS_LIBRARIES})
 target_link_libraries(gnutls_ktls ${GNUTLS_LIBRARIES})
+target_link_libraries(perf_test OpenSSL::SSL)
 
 # 可选：添加安装目标（如果需要）
 # install(TARGETS test_server DESTINATION bin)
