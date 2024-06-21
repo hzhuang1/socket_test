@@ -21,6 +21,9 @@
 #define DATA_MSG	"data hdr"
 #define MSG_HDR_LEN	8
 
+#define NSECS_IN_SEC	(1000000000)
+#define MSECS_IN_SEC	(1000000)
+
 #define TIMER_INTERVAL	2
 //#define TIMER_INTERVAL	180
 
@@ -32,25 +35,23 @@ typedef struct {
 	int count;				// sequence number
 	int length;				// length of the whole message
 	struct timespec start;
+	int payload_sz;
 } msg_t;
 
-static int memcmp_flag = 1;
 static int stop_flag = 0;
 static int msg_count = 0;
 
 static int stop_test(int sockfd, struct timespec start)
 {
 	int ret;
-	int len;
 	msg_t msg;
 
 	memcpy(&msg.cmd[0], STOP_MSG, MSG_HDR_LEN);
 	msg.count = msg_count;
+	msg.length = sizeof(msg);
 	memcpy(&msg.start, &start, sizeof(struct timespec));
-	printf("send out stop message with %d count\n", msg_count);
-	len = sizeof(msg);
-	ret = send(sockfd, &msg, len, 0);
-	if (ret < len)
+	ret = send(sockfd, &msg, msg.length, 0);
+	if (ret < msg.length)
 		perror("stop");
 	return ret;
 }
@@ -134,9 +135,20 @@ static void get_time_diff(struct timespec start, struct timespec end,
 		res->tv_nsec = end.tv_nsec - start.tv_nsec;
 		res->tv_sec = end.tv_sec - start.tv_sec;
 	} else {
-		res->tv_nsec = 1000000000 + end.tv_nsec - start.tv_nsec;
+		res->tv_nsec = NSECS_IN_SEC + end.tv_nsec - start.tv_nsec;
 		res->tv_sec = end.tv_sec - start.tv_sec - 1;
 	}
+}
+
+static void calc_perf(struct timespec res, int count, int data_sz)
+{
+	double total_sz;
+	double total_msec;		// count in micro seconds
+
+	total_sz = (double)data_sz * (double)count;
+	total_msec = res.tv_sec * MSECS_IN_SEC + res.tv_nsec / 1000;
+	printf("For %d-byte payload size, the bandwith is %.2fMB/s with %d count.\n",
+	       data_sz, total_sz / total_msec, count);
 }
 
 static void set_message_header(void *src, size_t len, int frame_num)
@@ -145,7 +157,8 @@ static void set_message_header(void *src, size_t len, int frame_num)
 
 	memcpy(&msg->cmd[0], DATA_MSG, MSG_HDR_LEN);
 	msg->count = frame_num;
-	msg->length = len;
+	msg->length = len + sizeof(msg_t);
+	msg->payload_sz = len;
 }
 
 int client_socket(void)
@@ -169,7 +182,6 @@ int client_socket(void)
 		perror("connect failed");
 		goto out;
 	}
-	printf("client sock:%d\n", sockfd);
 	return sockfd;
 out:
 	close(sockfd);
@@ -214,7 +226,7 @@ void client_sock_send(int fd, void *src, size_t len)
 
 	ret = send(fd, src, len, 0);
 	if ((ret <= 0) || (ret != (int)len)) {
-		printf("#%s, ret:%d, len:%d, msg_count:%d\n", __func__, ret, len, msg_count);
+		printf("#%s, ret:%d, len:%ld, msg_count:%d\n", __func__, ret, len, msg_count);
 		perror("send");
 		//exit(EXIT_FAILURE);
 	}
@@ -233,7 +245,7 @@ void server_sock_recv(int fd, void *dst, size_t len)
 		if (ret < 0) {
 			perror("recv");
 			exit(EXIT_FAILURE);
-		} else if (ret > left) {
+		} else if (ret > (int)left) {
 			perror("recv too much");
 			exit(EXIT_FAILURE);
 		} else if (ret == 0) {
@@ -266,9 +278,6 @@ static void start(client_t client_send, server_t server_recv, void *src,
 	struct timespec start, end, diff;
 	int cnt = 0;
 	msg_t *msg;
-	int ret;
-	int optval;
-	socklen_t optlen = sizeof(optval);
 
 	fd[1] = server_socket();
 	pid = fork();
@@ -297,7 +306,6 @@ static void start(client_t client_send, server_t server_recv, void *src,
 		stop_test(fd[0], start);
 
 		close(fd[0]);
-		printf("send %d messages\n", msg_count);
 		waitpid(-1, NULL, 0);
 	} else {
 		// child
@@ -326,13 +334,17 @@ static void start(client_t client_send, server_t server_recv, void *src,
 			}
 			cnt++;
 		}
-		printf("cnt:%d, msg->count:%d\n", cnt, msg->count);
+		// msg->count is counted from 0. So stop message is not
+		// recorded in msg->count.
 		if (cnt == msg->count) {
 			get_time_end(&end);
 			memcpy(&start, &msg->start, sizeof(start));
 			get_time_diff(start, end, &diff);
-			printf("recv count %d\n", msg->count);
-			printf("interval sec %ld\n", diff.tv_sec);
+			// At here, stop message is received.
+			// msg->length indicates the length of stop message,
+			// not data message.
+			// Only calculate data payload size.
+			calc_perf(diff, msg->count, len);
 		}
 		close(sockfd);
 		close(fd[1]);
@@ -340,30 +352,31 @@ static void start(client_t client_send, server_t server_recv, void *src,
 	}
 }
 
-int main(void)
+int do_sock_send(size_t len)
 {
-	size_t len = 128;
+	size_t msg_sz;
 	unsigned char *src, *dst;
 	int ret;
 
-	src = malloc(len);
+	msg_sz = len + sizeof(msg_t);
+	src = malloc(msg_sz);
 	if (src == NULL) {
 		perror("no memory for src");
 		ret = -ENOMEM;
 		goto out;
 	}
-	dst = malloc(len);
+	dst = malloc(msg_sz);
 	if (dst == NULL) {
 		perror("no memory for dst");
 		ret = -ENOMEM;
 		goto out_dst;
 	}
-	if (RAND_bytes(src, len) <= 0) {
+	if (RAND_bytes(src, msg_sz) <= 0) {
 		perror("rand");
 		ret = -EINVAL;
 		goto out_rnd;
 	}
-	memset(dst, 0, len);
+	memset(dst, 0, msg_sz);
 	start(client_sock_send, server_sock_recv, src, dst, len);
 	free(dst);
 	free(src);
@@ -374,4 +387,9 @@ out_dst:
 	free(src);
 out:
 	return ret;
+}
+
+int main(void)
+{
+	do_sock_send(4096);
 }
