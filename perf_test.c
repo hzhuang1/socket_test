@@ -1,11 +1,14 @@
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <openssl/rand.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/sendfile.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -27,8 +30,10 @@
 #define TIMER_INTERVAL	2
 //#define TIMER_INTERVAL	180
 
-typedef void (*client_t)(int fd, void *src, size_t len);
-typedef void (*server_t)(int fd, void *dst, size_t len);
+//#define ONLY_ONE_MESSAGE	1	// one data message
+
+typedef void (*client_t)(int sockfd, int fd, void *src, size_t len);
+typedef void (*server_t)(int sockfd, void *dst, size_t len);
 
 typedef struct {
 	unsigned char cmd[MSG_HDR_LEN];
@@ -119,7 +124,7 @@ static int start_timer(struct timespec *start)
 	return 0;
 }
 
-static int get_time_end(struct timespec *end)
+int get_time_end(struct timespec *end)
 {
 	if (clock_gettime(CLOCK_REALTIME, end) < 0) {
 		perror("get time");
@@ -128,8 +133,8 @@ static int get_time_end(struct timespec *end)
 	return 0;
 }
 
-static void get_time_diff(struct timespec start, struct timespec end,
-			  struct timespec *res)
+void get_time_diff(struct timespec start, struct timespec end,
+		   struct timespec *res)
 {
 	if (end.tv_nsec > start.tv_nsec) {
 		res->tv_nsec = end.tv_nsec - start.tv_nsec;
@@ -140,7 +145,7 @@ static void get_time_diff(struct timespec start, struct timespec end,
 	}
 }
 
-static void calc_perf(struct timespec res, int count, int data_sz)
+void calc_perf(struct timespec res, int count, int data_sz)
 {
 	double total_sz;
 	double total_msec;		// count in micro seconds
@@ -220,15 +225,59 @@ out:
 }
 
 // send one message
-void client_sock_send(int fd, void *src, size_t len)
+void client_sock_send(int sockfd, int fd, void *src, size_t len)
 {
 	int ret;
 
-	ret = send(fd, src, len, 0);
+	ret = send(sockfd, src, len + sizeof(msg_t), 0);
 	if ((ret <= 0) || (ret != (int)len)) {
 		printf("#%s, ret:%d, len:%ld, msg_count:%d\n", __func__, ret, len, msg_count);
 		perror("send");
 		//exit(EXIT_FAILURE);
+	}
+	(void)fd;
+}
+
+// split to send message header and file data
+void client_sock_send_fdata(int sockfd, int fd, void *src, size_t len)
+{
+	size_t res;
+	int ret;
+
+	ret = send(sockfd, src, sizeof(msg_t), 0);
+	if (ret < (int)sizeof(msg_t)) {
+		perror("send");
+		exit(EXIT_FAILURE);
+	}
+	lseek(fd, 0, SEEK_SET);
+	res = read(fd, src + sizeof(msg_t), len);
+	if (res < len) {
+		perror("read too less");
+		exit(EXIT_FAILURE);
+	}
+	ret = send(sockfd, src + sizeof(msg_t), len, 0);
+	if (ret < (int)len) {
+		perror("send");
+		exit(EXIT_FAILURE);
+	}
+}
+
+// split to send message header and file
+void client_sock_send_file(int sockfd, int fd, void *src, size_t len)
+{
+	size_t res;
+	off_t offset = 0;
+	int ret;
+
+	ret = send(sockfd, src, sizeof(msg_t), 0);
+	if (ret < (int)sizeof(msg_t)) {
+		perror("send");
+		exit(EXIT_FAILURE);
+	}
+	res = sendfile(sockfd, fd, &offset, len);
+	if (res < len) {
+		perror("sendfile");
+		exit(EXIT_FAILURE);
 	}
 }
 
@@ -238,7 +287,7 @@ void server_sock_recv(int fd, void *dst, size_t len)
 	int ret;
 	int new_frame = 1;
 	msg_t *msg;
-	size_t left = len;
+	size_t left = len + sizeof(msg_t);
 
 	while (1) {
 		ret = read(fd, dst, left);
@@ -269,8 +318,8 @@ void server_sock_recv(int fd, void *dst, size_t len)
 	};
 }
 
-static void start(client_t client_send, server_t server_recv, void *src,
-		  void *dst, size_t len)
+static void start(client_t client_send, server_t server_recv, int file_fd,
+		  void *src, void *dst, size_t len)
 {
 	int fd[2];
 	int sockfd;
@@ -299,10 +348,15 @@ static void start(client_t client_send, server_t server_recv, void *src,
 		printf("src:\n");
 		dump_buffer_hex(src, len);
 		*/
+#ifdef ONLY_ONE_MESSAGE
+		client_send(fd[0], file_fd, src, len);
+		msg_count++;
+#else
 		do {
-			client_send(fd[0], src, len);
+			client_send(fd[0], file_fd, src, len);
 			msg_count++;
 		} while (stop_flag == 0);
+#endif
 		stop_test(fd[0], start);
 
 		close(fd[0]);
@@ -315,25 +369,35 @@ static void start(client_t client_send, server_t server_recv, void *src,
 			return;
 		}
 
+#ifdef ONLY_ONE_MESSAGE
+		server_recv(sockfd, dst, len);
+		printf("dst:\n");
+		dump_buffer_hex(dst, len + sizeof(msg_t));
+
+		msg = (msg_t *)dst;
+		if (memcmp(msg->cmd, STOP_MSG, MSG_HDR_LEN) == 0) {
+			if (cnt > msg->count) {
+				perror("wrong count");
+				exit(EXIT_FAILURE);
+			}
+		}
+		(void)end;
+		(void)diff;
+#else
 		while (1) {
 			server_recv(sockfd, dst, len);
-			//printf("dst:\n");
-			//dump_buffer_hex(dst, len);
 
 			msg = (msg_t *)dst;
 			if (memcmp(msg->cmd, STOP_MSG, MSG_HDR_LEN) == 0) {
 				if (cnt > msg->count) {
 					perror("wrong count");
 					exit(EXIT_FAILURE);
-#if 1
 				} else if (cnt == msg->count)
 					break;
-#else
-				}
-#endif
 			}
 			cnt++;
 		}
+
 		// msg->count is counted from 0. So stop message is not
 		// recorded in msg->count.
 		if (cnt == msg->count) {
@@ -346,6 +410,7 @@ static void start(client_t client_send, server_t server_recv, void *src,
 			// Only calculate data payload size.
 			calc_perf(diff, msg->count, len);
 		}
+#endif
 		close(sockfd);
 		close(fd[1]);
 		exit(0);
@@ -377,7 +442,8 @@ int do_sock_send(size_t len)
 		goto out_rnd;
 	}
 	memset(dst, 0, msg_sz);
-	start(client_sock_send, server_sock_recv, src, dst, len);
+	// fd isn't used at here
+	start(client_sock_send, server_sock_recv, -1, src, dst, len);
 	free(dst);
 	free(src);
 	return 0;
@@ -389,7 +455,102 @@ out:
 	return ret;
 }
 
+int do_sock_fdata(char *name)
+{
+	unsigned char *src, *dst;
+	size_t msg_sz, len;
+	int fd;
+	int ret;
+	struct stat st;
+
+	fd = open(name, O_RDONLY);
+	if (fd < 0) {
+		perror("open");
+		exit(EXIT_FAILURE);
+	}
+
+	if (fstat(fd, &st) < 0) {
+		perror("fstat");
+		exit(EXIT_FAILURE);
+	}
+	len = st.st_size;
+	printf("Test to send file with %ld size.\n", len);
+
+	msg_sz = sizeof(msg_t) + len;
+	src = malloc(msg_sz);
+	if (src == NULL) {
+		perror("no memory for src");
+		ret = -ENOMEM;
+		goto out;
+	}
+	dst = malloc(msg_sz);
+	if (dst == NULL) {
+		perror("no memory for dst");
+		ret = -ENOMEM;
+		goto out_dst;
+	}
+	memset(dst, 0, msg_sz);
+	start(client_sock_send_fdata, server_sock_recv, fd, src, dst, len);
+	close(fd);
+	free(dst);
+	free(src);
+	return 0;
+out_dst:
+	free(src);
+out:
+	return ret;
+}
+
+int do_sock_file(char *name)
+{
+	unsigned char *src, *dst;
+	size_t msg_sz, len;
+	int fd;
+	int ret;
+	struct stat st;
+
+	fd = open(name, O_RDONLY);
+	if (fd < 0) {
+		perror("open");
+		exit(EXIT_FAILURE);
+	}
+
+	if (fstat(fd, &st) < 0) {
+		perror("fstat");
+		exit(EXIT_FAILURE);
+	}
+	len = st.st_size;
+	printf("Test to send file with %ld size.\n", len);
+
+	msg_sz = sizeof(msg_t) + len;
+	src = malloc(msg_sz);
+	if (src == NULL) {
+		perror("no memory for src");
+		ret = -ENOMEM;
+		goto out;
+	}
+	dst = malloc(msg_sz);
+	if (dst == NULL) {
+		perror("no memory for dst");
+		ret = -ENOMEM;
+		goto out_dst;
+	}
+	memset(dst, 0, msg_sz);
+	start(client_sock_send_file, server_sock_recv, fd, src, dst, len);
+	close(fd);
+	free(dst);
+	free(src);
+	return 0;
+out_dst:
+	free(src);
+out:
+	return ret;
+}
+
 int main(void)
 {
-	do_sock_send(4096);
+	//do_sock_send(4096);
+	//do_sock_fdata("data_64k.bin");
+	//do_sock_file("data_128.bin");
+	return 0;
 }
