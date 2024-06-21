@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/tcp.h>
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <signal.h>
@@ -34,7 +35,7 @@
 #define CERTIFICATE_FILE "server.crt"
 #define PRIVATE_KEY_FILE "server.key"
 
-//#define ONLY_ONE_MESSAGE	1	// one data message
+#define ONLY_ONE_MESSAGE	1	// one data message
 
 typedef void (*client_t)(int sockfd, int fd, void *src, size_t len);
 typedef void (*server_t)(int sockfd, void *dst, size_t len);
@@ -322,6 +323,29 @@ void client_ssl_send_fdata(SSL *ssl, int fd, void *src, size_t len)
 	ret = SSL_write(ssl, src + sizeof(msg_t), len);
 	if (ret < (int)len) {
 		perror("send data");
+		exit(EXIT_FAILURE);
+	}
+}
+
+void client_ssl_send_file(SSL *ssl, int fd, void *src, size_t len)
+{
+	size_t res;
+	int ret;
+
+	ret = SSL_write(ssl, src, sizeof(msg_t));
+	if (ret < (int)sizeof(msg_t)) {
+		printf("ret:%d, msg_t:%d\n", ret, sizeof(msg_t));
+		perror("send hdr");
+		exit(EXIT_FAILURE);
+	}
+	lseek(fd, 0, SEEK_SET);
+	printf("ktls send:%ld, ktls recv:%ld\n",
+		BIO_get_ktls_send(SSL_get_wbio(ssl)),
+		BIO_get_ktls_recv(SSL_get_rbio(ssl)));
+	ret = SSL_sendfile(ssl, fd, 0, len, 0);
+	if (ret < (int)len) {
+		printf("ret:%d\n", ret);
+		perror("send file");
 		exit(EXIT_FAILURE);
 	}
 }
@@ -680,6 +704,225 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 	}
 }
 
+static void start_ktls(client_ssl_t client_send, server_ssl_t server_recv,
+		       int file_fd, void *src, void *dst, size_t len)
+{
+	int fd[2];
+	int sockfd;
+	pid_t pid;
+	struct timespec start, end, diff;
+	int cnt = 0;
+	msg_t *msg;
+
+	fd[1] = server_socket();
+	pid = fork();
+	if (pid < 0) {
+		perror("fork");
+		exit(1);
+	}
+
+	if (pid) {
+		// parent
+		SSL_CTX *ctx;
+		SSL *ssl;
+		long verify_result;
+		struct tls_crypto_info_keys tls12;
+		int opt = 1;
+		int ret;
+
+		SSL_library_init();
+		OpenSSL_add_all_algorithms();
+		SSL_load_error_strings();
+
+		ctx = SSL_CTX_new(TLSv1_2_client_method());
+		if (ctx == NULL) {
+			perror("ctx");
+			exit(EXIT_FAILURE);
+		}
+		if (SSL_CTX_load_verify_locations(ctx, CERTIFICATE_FILE, NULL)
+		    != 1) {
+			perror("CA failed");
+			exit(EXIT_FAILURE);
+		}
+		SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+
+		fd[0] = client_socket();	// create client ssl
+		if (setsockopt(fd[0], SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
+			perror("setsockopt");
+			exit(EXIT_FAILURE);
+		}
+
+		/*
+		tls_crypto_info_init(TLS_1_2_VERSION, TLS_CIPHER_AES_GCM_128,
+				     &tls12);
+		// enable TLS
+		ret = setsockopt(fd[0], SOL_TCP, TCP_ULP, "tls", sizeof("tls"));
+		if (ret < 0) {
+			perror("set TCP_ULP\n");
+			exit(EXIT_FAILURE);
+		}
+		// start TLS
+		ret = setsockopt(fd[0], SOL_TLS, TLS_TX, &tls12, tls12.len);
+		if (ret < 0) {
+			perror("set TLS_TX");
+			exit(EXIT_FAILURE);
+		}
+		*/
+
+		ssl = SSL_new(ctx);
+		SSL_set_fd(ssl, fd[0]);		// bind ssl with sock
+		SSL_set_options(ssl, SSL_OP_ENABLE_KTLS);
+
+		if (SSL_connect(ssl) == -1) {
+			perror("ssl connect");
+			exit(EXIT_FAILURE);
+		}
+
+		verify_result = SSL_get_verify_result(ssl);
+		if (verify_result != X509_V_OK) {
+			perror("SSL failed");
+			exit(EXIT_FAILURE);
+		}
+
+		if (start_timer(&start) < 0) {
+			close(fd[0]);
+			exit(EXIT_FAILURE);
+		}
+
+		set_message_header(src, len, msg_count);
+#ifdef ONLY_ONE_MESSAGE
+		client_send(ssl, file_fd, src, len);
+		msg_count++;
+#else
+		do {
+			client_send(ssl, file_fd, src, len);
+			msg_count++;
+		} while (stop_flag == 0);
+#endif
+		stop_ssl_test(ssl, start);
+
+		SSL_shutdown(ssl);
+		SSL_free(ssl);
+		SSL_CTX_free(ctx);
+
+		close(fd[0]);
+		waitpid(-1, NULL, 0);
+	} else {
+		// child
+		SSL_CTX *ctx;
+		SSL *ssl;
+		struct tls_crypto_info_keys tls12;
+		int ret;
+
+		OpenSSL_add_all_algorithms();
+		SSL_load_error_strings();
+
+		ctx = SSL_CTX_new(TLSv1_2_server_method());
+		if (ctx == NULL) {
+			perror("ssl ctx");
+			exit(EXIT_FAILURE);
+		}
+
+		if (SSL_CTX_use_certificate_file(ctx, CERTIFICATE_FILE,
+						 SSL_FILETYPE_PEM) <= 0) {
+			perror("ssl cert");
+			exit(EXIT_FAILURE);
+		}
+
+		if (SSL_CTX_use_PrivateKey_file(ctx, PRIVATE_KEY_FILE,
+						SSL_FILETYPE_PEM) <= 0) {
+			perror("ssl key");
+			exit(EXIT_FAILURE);
+		}
+
+		if (!SSL_CTX_check_private_key(ctx)) {
+			fprintf(stderr, "Private key does not match the public certificate\n");
+			exit(EXIT_FAILURE);
+		}
+
+		/*
+		tls_crypto_info_init(TLS_1_2_VERSION, TLS_CIPHER_AES_GCM_128,
+				     &tls12);
+		// enable TLS
+		ret = setsockopt(fd[0], SOL_TCP, TCP_ULP, "tls", sizeof("tls"));
+		if (ret < 0) {
+			perror("set TCP_ULP\n");
+			exit(EXIT_FAILURE);
+		}
+		// start TLS
+		ret = setsockopt(fd[0], SOL_TLS, TLS_TX, &tls12, tls12.len);
+		if (ret < 0) {
+			perror("set TLS_TX");
+			exit(EXIT_FAILURE);
+		}
+		*/
+
+		sockfd = accept(fd[1], NULL, NULL);
+		if (sockfd < 0) {
+			perror("accept");
+			return;
+		}
+
+		ssl = SSL_new(ctx);
+		SSL_set_fd(ssl, sockfd);
+
+		if (SSL_accept(ssl) <= 0) {
+			perror("ssl accept");
+			exit(EXIT_FAILURE);
+		}
+
+#ifdef ONLY_ONE_MESSAGE
+		server_recv(ssl, dst, len);
+		printf("dst:\n");
+		dump_buffer_hex(dst, len + sizeof(msg_t));
+
+		msg = (msg_t *)dst;
+		if (memcmp(msg->cmd, STOP_MSG, MSG_HDR_LEN) == 0) {
+			if (cnt > msg->count) {
+				perror("wrong count");
+				exit(EXIT_FAILURE);
+			}
+		}
+		(void)end;
+		(void)diff;
+#else
+		while (1) {
+			server_recv(ssl, dst, len);
+
+			msg = (msg_t *)dst;
+			if (memcmp(msg->cmd, STOP_MSG, MSG_HDR_LEN) == 0) {
+				if (cnt > msg->count) {
+					perror("wrong count");
+					exit(EXIT_FAILURE);
+				} else if (cnt == msg->count)
+					break;
+			}
+			cnt++;
+		}
+
+		// msg->count is counted from 0. So stop message is not
+		// recorded in msg->count.
+		if (cnt == msg->count) {
+			get_time_end(&end);
+			memcpy(&start, &msg->start, sizeof(start));
+			get_time_diff(start, end, &diff);
+			// At here, stop message is received.
+			// msg->length indicates the length of stop message,
+			// not data message.
+			// Only calculate data payload size.
+			calc_perf(diff, msg->count, len);
+		}
+#endif
+		SSL_shutdown(ssl);
+		SSL_free(ssl);
+		SSL_CTX_free(ctx);
+
+		close(sockfd);
+		close(fd[1]);
+		exit(0);
+	}
+}
+
 int do_sock_send(size_t len)
 {
 	size_t msg_sz;
@@ -856,11 +1099,58 @@ out:
 	return ret;
 }
 
+int do_ssl_file(char *name)
+{
+	unsigned char *src, *dst;
+	size_t msg_sz, len;
+	int fd;
+	int ret;
+	struct stat st;
+
+	fd = open(name, O_RDONLY);
+	if (fd < 0) {
+		perror("open");
+		exit(EXIT_FAILURE);
+	}
+
+	if (fstat(fd, &st) < 0) {
+		perror("fstat");
+		exit(EXIT_FAILURE);
+	}
+	len = st.st_size;
+	printf("Test to send file with %ld size.\n", len);
+
+	msg_sz = sizeof(msg_t) + len;
+	src = malloc(msg_sz);
+	if (src == NULL) {
+		perror("no memory for src");
+		ret = -ENOMEM;
+		goto out;
+	}
+	dst = malloc(msg_sz);
+	if (dst == NULL) {
+		perror("no memory for dst");
+		ret = -ENOMEM;
+		goto out_dst;
+	}
+	memset(dst, 0, msg_sz);
+	start_ktls(client_ssl_send_file, server_ssl_recv, fd, src, dst, len);
+	close(fd);
+	free(dst);
+	free(src);
+	return 0;
+out_dst:
+	free(src);
+out:
+	return ret;
+}
+
 int main(void)
 {
 	//do_sock_send(4096);
 	//do_sock_fdata("data_64k.bin");
 	//do_sock_file("data_128.bin");
-	do_ssl_fdata("data_64k.bin");
+	//do_ssl_fdata("data_128.bin");
+	do_ssl_file("data_128.bin");
 	return 0;
 }
