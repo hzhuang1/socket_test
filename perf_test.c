@@ -220,10 +220,17 @@ int server_socket(void)
 {
 	struct sockaddr_in server_addr = { 0 };
 	int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+	int optval = 1;
 
 	if (server_fd < 0) {
 		perror("fail to open server socket");
 		exit(EXIT_FAILURE);
+	}
+
+	// optval = 1, make address reusable
+	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval))) {
+		perror("fail to set server address reuse");
+		goto out;
 	}
 
 	server_addr.sin_family = AF_INET;
@@ -253,10 +260,10 @@ void client_sock_send(int sockfd, int fd, void *src, size_t len)
 	int ret;
 
 	ret = send(sockfd, src, len + sizeof(msg_t), 0);
-	if ((ret <= 0) || (ret != (int)len)) {
-		printf("#%s, ret:%d, len:%ld, msg_count:%d\n", __func__, ret, len, msg_count);
+	if (ret != (int)(len + sizeof(msg_t))) {
+		printf("#%s, ret:%d, len:%ld, sizeof(msg_t):%ld, msg_count:%d\n", __func__, ret, len, sizeof(msg_t), msg_count);
 		perror("send");
-		//exit(EXIT_FAILURE);
+		exit(EXIT_FAILURE);
 	}
 	(void)fd;
 }
@@ -268,18 +275,18 @@ void client_sock_send_fdata(int sockfd, int fd, void *src, size_t len)
 	int ret;
 
 	ret = send(sockfd, src, sizeof(msg_t), 0);
-	if (ret < (int)sizeof(msg_t)) {
+	if (ret != (int)sizeof(msg_t)) {
 		perror("send");
 		exit(EXIT_FAILURE);
 	}
 	lseek(fd, 0, SEEK_SET);
 	res = read(fd, src + sizeof(msg_t), len);
-	if (res < len) {
+	if (res != len) {
 		perror("read too less");
 		exit(EXIT_FAILURE);
 	}
 	ret = send(sockfd, src + sizeof(msg_t), len, 0);
-	if (ret < (int)len) {
+	if (ret != (int)len) {
 		perror("send");
 		exit(EXIT_FAILURE);
 	}
@@ -293,12 +300,12 @@ void client_sock_send_file(int sockfd, int fd, void *src, size_t len)
 	int ret;
 
 	ret = send(sockfd, src, sizeof(msg_t), 0);
-	if (ret < (int)sizeof(msg_t)) {
+	if (ret != (int)sizeof(msg_t)) {
 		perror("send");
 		exit(EXIT_FAILURE);
 	}
 	res = sendfile(sockfd, fd, &offset, len);
-	if (res < len) {
+	if (res != len) {
 		perror("sendfile");
 		exit(EXIT_FAILURE);
 	}
@@ -310,18 +317,18 @@ void client_ssl_send_fdata(SSL *ssl, int fd, void *src, size_t len)
 	int ret;
 
 	ret = SSL_write(ssl, src, sizeof(msg_t));
-	if (ret < (int)sizeof(msg_t)) {
+	if (ret != (int)sizeof(msg_t)) {
 		perror("send hdr");
 		exit(EXIT_FAILURE);
 	}
 	lseek(fd, 0, SEEK_SET);
 	res = read(fd, src + sizeof(msg_t), len);
-	if (res < len) {
+	if (res != len) {
 		perror("read too less");
 		exit(EXIT_FAILURE);
 	}
 	ret = SSL_write(ssl, src + sizeof(msg_t), len);
-	if (ret < (int)len) {
+	if (ret != (int)len) {
 		perror("send data");
 		exit(EXIT_FAILURE);
 	}
@@ -332,13 +339,13 @@ void client_ssl_send_file(SSL *ssl, int fd, void *src, size_t len)
 	int ret;
 
 	ret = SSL_write(ssl, src, sizeof(msg_t));
-	if (ret < (int)sizeof(msg_t)) {
+	if (ret != (int)sizeof(msg_t)) {
 		perror("send hdr");
 		exit(EXIT_FAILURE);
 	}
 	lseek(fd, 0, SEEK_SET);
 	ret = SSL_sendfile(ssl, fd, 0, len, 0);
-	if (ret < (int)len) {
+	if (ret != (int)len) {
 		printf("ret:%d\n", ret);
 		perror("send file");
 		exit(EXIT_FAILURE);
@@ -463,6 +470,7 @@ static void start_sock(client_t client_send, server_t server_recv, int file_fd,
 		stop_test(fd[0], start);
 
 		close(fd[0]);
+		close(fd[1]);
 		waitpid(-1, NULL, 0);
 	} else {
 		// child
@@ -517,7 +525,6 @@ static void start_sock(client_t client_send, server_t server_recv, int file_fd,
 #endif
 		close(sockfd);
 		close(fd[1]);
-		exit(0);
 	}
 }
 
@@ -610,6 +617,7 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 		SSL_CTX_free(ctx);
 
 		close(fd[0]);
+		close(fd[1]);
 		waitpid(-1, NULL, 0);
 	} else {
 		// child
@@ -934,10 +942,17 @@ out:
 
 int main(void)
 {
-	//do_sock_send(128);
-	//do_sock_fdata("data_2m.bin");
+	printf("sock send case:\n");
+	do_sock_send(128);
+	printf("read file & send over socket:\n");
+	do_sock_fdata("data_128.bin");
+	printf("sendfile:\n");
 	do_sock_file("data_128.bin");
-	//do_ssl_fdata("data_2m.bin");
-	//do_ssl_file("data_2m.bin");
+	printf("read file & send over SSL:\n");
+	do_ssl_fdata("data_128.bin");
+	/*
+	printf("sendfile over SSL:\n");
+	do_ssl_file("data_128.bin");
+	*/
 	return 0;
 }
