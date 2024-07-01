@@ -29,11 +29,13 @@
 #define NSECS_IN_SEC	(1000000000)
 #define MSECS_IN_SEC	(1000000)
 
-//#define TIMER_INTERVAL	2
-#define TIMER_INTERVAL	10
+#define TIMER_INTERVAL	2
+//#define TIMER_INTERVAL	60
 
 #define CERTIFICATE_FILE "server.crt"
 #define PRIVATE_KEY_FILE "server.key"
+
+#define DATA_FILE_NAME	"data_128.bin"
 
 //#define ONLY_ONE_MESSAGE	1	// one data message
 
@@ -258,44 +260,25 @@ out:
 void client_sock_send(int sockfd, int fd, void *src, size_t len)
 {
 	int ret;
+	off_t offset = 0;
+	size_t left = len + sizeof(msg_t);
 
-	ret = send(sockfd, src, len + sizeof(msg_t), 0);
-	if (ret != (int)(len + sizeof(msg_t))) {
-		printf("#%s, ret:%d, len:%ld, sizeof(msg_t):%ld, msg_count:%d\n", __func__, ret, len, sizeof(msg_t), msg_count);
-		perror("send");
-		exit(EXIT_FAILURE);
-	}
+	do {
+		ret = send(sockfd, src + offset, left, 0);
+		if (ret < 0) {
+			perror("send");
+			exit(EXIT_FAILURE);
+		}
+		left = left - ret;
+		offset += ret;
+	} while (left);
 	(void)fd;
 }
 
 // split to send message header and file data
 void client_sock_send_fdata(int sockfd, int fd, void *src, size_t len)
 {
-	size_t res;
-	int ret;
-
-	ret = send(sockfd, src, sizeof(msg_t), 0);
-	if (ret != (int)sizeof(msg_t)) {
-		perror("send");
-		exit(EXIT_FAILURE);
-	}
-	lseek(fd, 0, SEEK_SET);
-	res = read(fd, src + sizeof(msg_t), len);
-	if (res != len) {
-		perror("read too less");
-		exit(EXIT_FAILURE);
-	}
-	ret = send(sockfd, src + sizeof(msg_t), len, 0);
-	if (ret != (int)len) {
-		perror("send");
-		exit(EXIT_FAILURE);
-	}
-}
-
-// split to send message header and file
-void client_sock_send_file(int sockfd, int fd, void *src, size_t len)
-{
-	size_t res;
+	size_t res, left = len;
 	off_t offset = 0;
 	int ret;
 
@@ -304,16 +287,49 @@ void client_sock_send_file(int sockfd, int fd, void *src, size_t len)
 		perror("send");
 		exit(EXIT_FAILURE);
 	}
-	res = sendfile(sockfd, fd, &offset, len);
+	lseek(fd, 0, SEEK_SET);
+	res = read(fd, src + sizeof(msg_t), len);
 	if (res != len) {
-		perror("sendfile");
+		perror("read too less");
 		exit(EXIT_FAILURE);
 	}
+	do {
+		ret = send(sockfd, src + sizeof(msg_t) + offset, left, 0);
+		if (ret != (int)len) {
+			perror("send");
+			exit(EXIT_FAILURE);
+		}
+		left = left - ret;
+		offset += ret;
+	} while (left);
+}
+
+// split to send message header and file
+void client_sock_send_file(int sockfd, int fd, void *src, size_t len)
+{
+	size_t res, left = len;
+	off_t offset = 0;
+	int ret;
+
+	ret = send(sockfd, src, sizeof(msg_t), 0);
+	if (ret != (int)sizeof(msg_t)) {
+		perror("send");
+		exit(EXIT_FAILURE);
+	}
+	do {
+		res = sendfile(sockfd, fd, &offset, left);
+		left = left - res;
+		if (left > len) {
+			perror("sendfile");
+			exit(EXIT_FAILURE);
+		}
+	} while (left);
 }
 
 void client_ssl_send_fdata(SSL *ssl, int fd, void *src, size_t len)
 {
-	size_t res;
+	size_t res, left = len;
+	off_t offset = 0;
 	int ret;
 
 	ret = SSL_write(ssl, src, sizeof(msg_t));
@@ -327,15 +343,21 @@ void client_ssl_send_fdata(SSL *ssl, int fd, void *src, size_t len)
 		perror("read too less");
 		exit(EXIT_FAILURE);
 	}
-	ret = SSL_write(ssl, src + sizeof(msg_t), len);
-	if (ret != (int)len) {
-		perror("send data");
-		exit(EXIT_FAILURE);
-	}
+	do {
+		ret = SSL_write(ssl, src + sizeof(msg_t) + offset, left);
+		if (ret < 0) {
+			perror("send data");
+			exit(EXIT_FAILURE);
+		}
+		left = left - ret;
+		offset += ret;
+	} while (left);
 }
 
 void client_ssl_send_file(SSL *ssl, int fd, void *src, size_t len)
 {
+	size_t left = len;
+	off_t offset = 0;
 	int ret;
 
 	ret = SSL_write(ssl, src, sizeof(msg_t));
@@ -344,12 +366,15 @@ void client_ssl_send_file(SSL *ssl, int fd, void *src, size_t len)
 		exit(EXIT_FAILURE);
 	}
 	lseek(fd, 0, SEEK_SET);
-	ret = SSL_sendfile(ssl, fd, 0, len, 0);
-	if (ret != (int)len) {
-		printf("ret:%d\n", ret);
-		perror("send file");
-		exit(EXIT_FAILURE);
-	}
+	do {
+		ret = SSL_sendfile(ssl, fd, offset, left, 0);
+		if (ret < 0) {
+			perror("send file");
+			exit(EXIT_FAILURE);
+		}
+		left = left - ret;
+		offset += ret;
+	} while (left);
 }
 
 // receive one message
@@ -367,9 +392,6 @@ void server_sock_recv(int fd, void *dst, size_t len)
 			exit(EXIT_FAILURE);
 		} else if (ret > (int)left) {
 			perror("recv too much");
-			exit(EXIT_FAILURE);
-		} else if (ret == 0) {
-			perror("recv none");
 			exit(EXIT_FAILURE);
 		}
 		left = left - ret;
@@ -404,9 +426,6 @@ void server_ssl_recv(SSL *ssl, void *dst, size_t len)
 			exit(EXIT_FAILURE);
 		} else if (ret > (int)left) {
 			perror("recv too much");
-			exit(EXIT_FAILURE);
-		} else if (ret == 0) {
-			perror("recv none");
 			exit(EXIT_FAILURE);
 		}
 		offset += ret;
@@ -717,11 +736,26 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 	}
 }
 
-int do_sock_send(size_t len)
+int do_sock_send(char *name)
 {
-	size_t msg_sz;
+	size_t msg_sz, len;
 	unsigned char *src, *dst;
-	int ret;
+	int fd, ret;
+	struct stat st;
+
+	fd = open(name, O_RDONLY);
+	if (fd < 0) {
+		perror("open");
+		exit(EXIT_FAILURE);
+	}
+
+	if (fstat(fd, &st) < 0) {
+		perror("fstat");
+		exit(EXIT_FAILURE);
+	}
+	len = st.st_size;
+	printf("Test to send with %ld size.\n", len);
+	close(fd);
 
 	msg_sz = len + sizeof(msg_t);
 	src = malloc(msg_sz);
@@ -943,16 +977,14 @@ out:
 int main(void)
 {
 	printf("sock send case:\n");
-	do_sock_send(128);
+	do_sock_send(DATA_FILE_NAME);
 	printf("read file & send over socket:\n");
-	do_sock_fdata("data_128.bin");
+	do_sock_fdata(DATA_FILE_NAME);
 	printf("sendfile:\n");
-	do_sock_file("data_128.bin");
+	do_sock_file(DATA_FILE_NAME);
 	printf("read file & send over SSL:\n");
-	do_ssl_fdata("data_128.bin");
-	/*
+	do_ssl_fdata(DATA_FILE_NAME);
 	printf("sendfile over SSL:\n");
-	do_ssl_file("data_128.bin");
-	*/
+	do_ssl_file(DATA_FILE_NAME);
 	return 0;
 }
