@@ -26,6 +26,8 @@
 #define DATA_MSG	"data hdr"
 #define MSG_HDR_LEN	8
 
+#define TRANS_BLKSZ	65536		// 64KB
+
 #define NSECS_IN_SEC	(1000000000)
 #define MSECS_IN_SEC	(1000000)
 
@@ -57,6 +59,7 @@ typedef struct {
 
 static int msg_count = 0;
 static int ssl_ktls_flag = 0;
+static int resend_count = 0;
 
 static int stop_test(int sockfd, struct timespec start)
 {
@@ -201,15 +204,19 @@ void client_sock_send(int sockfd, int fd, void *src, size_t len)
 	int ret;
 	off_t offset = 0;
 	size_t left = len + sizeof(msg_t);
+	size_t trans_left = (left > TRANS_BLKSZ) ? TRANS_BLKSZ : left;
 
 	do {
-		ret = send(sockfd, src + offset, left, 0);
+		ret = send(sockfd, src + offset, trans_left, 0);
 		if (ret < 0) {
 			perror("send");
 			exit(EXIT_FAILURE);
 		}
+		if ((size_t)ret != trans_left)
+			resend_count++;
 		left = left - ret;
 		offset += ret;
+		trans_left = (left > TRANS_BLKSZ) ? TRANS_BLKSZ : left;
 	} while (left);
 	(void)fd;
 }
@@ -218,6 +225,7 @@ void client_sock_send(int sockfd, int fd, void *src, size_t len)
 void client_sock_send_fdata(int sockfd, int fd, void *src, size_t len)
 {
 	size_t res, left = len;
+	size_t trans_left = (left > TRANS_BLKSZ) ? TRANS_BLKSZ : left;
 	off_t offset = 0;
 	int ret;
 
@@ -233,13 +241,16 @@ void client_sock_send_fdata(int sockfd, int fd, void *src, size_t len)
 		exit(EXIT_FAILURE);
 	}
 	do {
-		ret = send(sockfd, src + sizeof(msg_t) + offset, left, 0);
+		ret = send(sockfd, src + sizeof(msg_t) + offset, trans_left, 0);
 		if (ret != (int)len) {
 			perror("send");
 			exit(EXIT_FAILURE);
 		}
+		if ((size_t)ret != trans_left)
+			resend_count++;
 		left = left - ret;
 		offset += ret;
+		trans_left = (left > TRANS_BLKSZ) ? TRANS_BLKSZ : left;
 	} while (left);
 }
 
@@ -247,6 +258,7 @@ void client_sock_send_fdata(int sockfd, int fd, void *src, size_t len)
 void client_sock_send_file(int sockfd, int fd, void *src, size_t len)
 {
 	size_t res, left = len;
+	size_t trans_left = (left > TRANS_BLKSZ) ? TRANS_BLKSZ : left;
 	off_t offset = 0;
 	int ret;
 
@@ -256,18 +268,22 @@ void client_sock_send_file(int sockfd, int fd, void *src, size_t len)
 		exit(EXIT_FAILURE);
 	}
 	do {
-		res = sendfile(sockfd, fd, &offset, left);
+		res = sendfile(sockfd, fd, &offset, trans_left);
+		if (res != trans_left)
+			resend_count++;
 		left = left - res;
 		if (left > len) {
 			perror("sendfile");
 			exit(EXIT_FAILURE);
 		}
+		trans_left = (left > TRANS_BLKSZ) ? TRANS_BLKSZ : left;
 	} while (left);
 }
 
 void client_ssl_send_fdata(SSL *ssl, int fd, void *src, size_t len)
 {
 	size_t res, left = len;
+	size_t trans_left = (left > TRANS_BLKSZ) ? TRANS_BLKSZ : left;
 	off_t offset = 0;
 	int ret;
 
@@ -283,19 +299,23 @@ void client_ssl_send_fdata(SSL *ssl, int fd, void *src, size_t len)
 		exit(EXIT_FAILURE);
 	}
 	do {
-		ret = SSL_write(ssl, src + sizeof(msg_t) + offset, left);
+		ret = SSL_write(ssl, src + sizeof(msg_t) + offset, trans_left);
 		if (ret < 0) {
 			perror("send data");
 			exit(EXIT_FAILURE);
 		}
+		if ((size_t)ret != trans_left)
+			resend_count++;
 		left = left - ret;
 		offset += ret;
+		trans_left = (left > TRANS_BLKSZ) ? TRANS_BLKSZ : left;
 	} while (left);
 }
 
 void client_ssl_send_file(SSL *ssl, int fd, void *src, size_t len)
 {
 	size_t left = len;
+	size_t trans_left = (left > TRANS_BLKSZ) ? TRANS_BLKSZ : left;
 	off_t offset = 0;
 	int ret;
 
@@ -306,13 +326,16 @@ void client_ssl_send_file(SSL *ssl, int fd, void *src, size_t len)
 	}
 	lseek(fd, 0, SEEK_SET);
 	do {
-		ret = SSL_sendfile(ssl, fd, offset, left, 0);
+		ret = SSL_sendfile(ssl, fd, offset, trans_left, 0);
 		if (ret < 0) {
 			perror("send file");
 			exit(EXIT_FAILURE);
 		}
+		if ((size_t)ret != trans_left)
+			resend_count++;
 		left = left - ret;
 		offset += ret;
+		trans_left = (left > TRANS_BLKSZ) ? TRANS_BLKSZ : left;
 	} while (left);
 }
 
@@ -396,6 +419,7 @@ static void start_sock(client_t client_send, server_t server_recv, int file_fd,
 	msg_t *msg;
 
 	msg_count = 0;
+	resend_count = 0;
 
 	fd[1] = server_socket();
 	pid = fork();
@@ -432,6 +456,8 @@ static void start_sock(client_t client_send, server_t server_recv, int file_fd,
 		close(fd[0]);
 		close(fd[1]);
 		waitpid(-1, NULL, 0);
+		if (resend_count)
+			printf("resend count: %d\n", resend_count);
 	} else {
 		// child
 		sockfd = accept(fd[1], NULL, NULL);
@@ -500,6 +526,7 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 	msg_t *msg;
 
 	msg_count = 0;
+	resend_count = 0;
 
 	fd[1] = server_socket();
 	pid = fork();
@@ -590,6 +617,8 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 		close(fd[0]);
 		close(fd[1]);
 		waitpid(-1, NULL, 0);
+		if (resend_count)
+			printf("resend count: %d\n", resend_count);
 	} else {
 		// child
 		SSL_CTX *ctx;
