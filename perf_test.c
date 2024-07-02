@@ -52,7 +52,6 @@ typedef struct {
 	int payload_sz;
 } msg_t;
 
-static int stop_flag = 0;
 static int msg_count = 0;
 static int ssl_ktls_flag = 0;
 
@@ -86,83 +85,9 @@ static int stop_ssl_test(SSL *ssl, struct timespec start)
 	return ret;
 }
 
-static void timer_handler(int sig, siginfo_t *si, void *uc)
+int get_time(struct timespec *tm)
 {
-	__atomic_store_n(&stop_flag, 1, __ATOMIC_RELAXED);
-	(void)sig;
-	(void)si;
-	(void)uc;
-}
-
-static int start_timer(struct timespec *start, timer_t *timerid)
-{
-	struct sigaction sa;
-	sigset_t mask;
-	struct sigevent sev;
-	struct itimerspec its = { 0 };
-
-	// establish handler for timer signal
-	sa.sa_flags = SA_SIGINFO;
-	sa.sa_sigaction = timer_handler;
-	sigemptyset(&sa.sa_mask);
-	if (sigaction(SIGRTMIN, &sa, NULL) == -1) {
-		perror("sigaction");
-		return -errno;
-	}
-
-	// block timer signal temporarily
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGRTMIN);
-	if (sigprocmask(SIG_SETMASK, &mask, NULL) == -1) {
-		perror("block timer signal");
-		return -errno;
-	}
-
-	// create timer
-	sev.sigev_notify = SIGEV_SIGNAL;
-	sev.sigev_signo = SIGRTMIN;
-	sev.sigev_value.sival_ptr = &timerid;
-	if (timer_create(CLOCK_REALTIME, &sev, timerid) == -1) {
-		perror("timer");
-		return -errno;
-	}
-
-	// record start time
-	if (clock_gettime(CLOCK_REALTIME, start) < 0) {
-		perror("get time");
-		return -errno;
-	}
-
-	// start the timer
-	its.it_value.tv_sec = TIMER_INTERVAL;
-	if (timer_settime(*timerid, 0, &its, NULL) == -1) {
-		perror("settime");
-		return -errno;
-	}
-
-	// unblock timer signal
-	if (sigprocmask(SIG_UNBLOCK, &mask, NULL) == -1) {
-		perror("unblock timer signal");
-		return -errno;
-	}
-	return 0;
-}
-
-static int stop_timer(timer_t timerid)
-{
-	struct sigaction sa;
-
-	timer_delete(timerid);
-	sa.sa_handler = SIG_DFL;
-	sa.sa_flags = 0;
-	sigemptyset(&sa.sa_mask);
-	sigaction(SIGRTMIN, &sa, NULL);
-	return 0;
-}
-
-int get_time_end(struct timespec *end)
-{
-	if (clock_gettime(CLOCK_REALTIME, end) < 0) {
+	if (clock_gettime(CLOCK_REALTIME, tm) < 0) {
 		perror("get time");
 		return -errno;
 	}
@@ -464,13 +389,10 @@ static void start_sock(client_t client_send, server_t server_recv, int file_fd,
 	int sockfd;
 	pid_t pid;
 	struct timespec start, end, diff;
-	timer_t timerid;
 	int cnt = 0;
 	msg_t *msg;
-	int stop_value;
 
 	msg_count = 0;
-	__atomic_store_n(&stop_flag, 0, __ATOMIC_RELAXED);
 
 	fd[1] = server_socket();
 	pid = fork();
@@ -480,16 +402,10 @@ static void start_sock(client_t client_send, server_t server_recv, int file_fd,
 	}
 
 	if (pid) {
-		sigset_t orig_mask;
-
 		// parent
 		fd[0] = client_socket();	// create client sockfd
 
-		pthread_sigmask(SIG_SETMASK, NULL, &orig_mask);
-		if (start_timer(&start, &timerid) < 0) {
-			close(fd[0]);
-			exit(EXIT_FAILURE);
-		}
+		get_time(&start);
 
 		memset(src, 0, len + sizeof(msg_t));
 		set_message_header(src, len, msg_count);
@@ -504,13 +420,11 @@ static void start_sock(client_t client_send, server_t server_recv, int file_fd,
 		do {
 			client_send(fd[0], file_fd, src, len);
 			msg_count++;
-			// stop if find stop_flag that is set by timer_handler().
-			stop_value = __atomic_load_n(&stop_flag, __ATOMIC_RELAXED);
-		} while (stop_value == 0);
+			get_time(&end);
+			get_time_diff(start, end, &diff);
+		} while (diff.tv_sec < TIMER_INTERVAL);
 #endif
 		stop_test(fd[0], start);
-		stop_timer(timerid);
-		pthread_sigmask(SIG_SETMASK, &orig_mask, NULL);
 
 		close(fd[0]);
 		close(fd[1]);
@@ -556,7 +470,7 @@ static void start_sock(client_t client_send, server_t server_recv, int file_fd,
 		// msg->count is counted from 0. So stop message is not
 		// recorded in msg->count.
 		if (cnt == msg->count) {
-			get_time_end(&end);
+			get_time(&end);
 			memcpy(&start, &msg->start, sizeof(start));
 			get_time_diff(start, end, &diff);
 			// At here, stop message is received.
@@ -579,12 +493,10 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 	int sockfd;
 	pid_t pid;
 	struct timespec start, end, diff;
-	timer_t timerid;
 	int cnt = 0;
 	msg_t *msg;
 
 	msg_count = 0;
-	__atomic_store_n(&stop_flag, 0, __ATOMIC_RELAXED);
 
 	fd[1] = server_socket();
 	pid = fork();
@@ -599,8 +511,6 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 		SSL *ssl;
 		long verify_result;
 		int opt = 1;
-		int stop_value;
-		sigset_t orig_mask;
 
 		SSL_library_init();
 		OpenSSL_add_all_algorithms();
@@ -644,11 +554,7 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 			BIO_get_ktls_send(SSL_get_wbio(ssl)),
 			BIO_get_ktls_recv(SSL_get_rbio(ssl)));
 
-		pthread_sigmask(SIG_SETMASK, NULL, &orig_mask);
-		if (start_timer(&start, &timerid) < 0) {
-			close(fd[0]);
-			exit(EXIT_FAILURE);
-		}
+		get_time(&start);
 
 		memset(src, 0, len + sizeof(msg_t));
 		set_message_header(src, len, msg_count);
@@ -659,12 +565,11 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 		do {
 			client_send(ssl, file_fd, src, len);
 			msg_count++;
-			stop_value = __atomic_load_n(&stop_flag, __ATOMIC_RELAXED);
-		} while (stop_value == 0);
+			get_time(&end);
+			get_time_diff(start, end, &diff);
+		} while (diff.tv_sec < TIMER_INTERVAL);
 #endif
 		stop_ssl_test(ssl, start);
-		stop_timer(timerid);
-		pthread_sigmask(SIG_SETMASK, &orig_mask, NULL);
 
 		SSL_shutdown(ssl);
 		SSL_free(ssl);
@@ -751,7 +656,7 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 		// msg->count is counted from 0. So stop message is not
 		// recorded in msg->count.
 		if (cnt == msg->count) {
-			get_time_end(&end);
+			get_time(&end);
 			memcpy(&start, &msg->start, sizeof(start));
 			get_time_diff(start, end, &diff);
 			// At here, stop message is received.
