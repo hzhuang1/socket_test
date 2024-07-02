@@ -250,7 +250,7 @@ void client_sock_send_fdata(int sockfd, int fd, void *src, size_t len)
 	}
 	do {
 		ret = send(sockfd, src + sizeof(msg_t) + offset, trans_left, 0);
-		if (ret != (int)len) {
+		if (ret < 0) {
 			perror("send");
 			exit(EXIT_FAILURE);
 		}
