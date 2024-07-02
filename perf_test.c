@@ -37,6 +37,9 @@
 
 #define DATA_FILE_NAME	"data_128.bin"
 
+#define CIPHER_NAME	"default"
+//#define CIPHER_NAME	"AES128-GCM-SHA256"
+
 //#define ONLY_ONE_MESSAGE	1	// one data message
 
 typedef void (*client_t)(int sockfd, int fd, void *src, size_t len);
@@ -539,6 +542,13 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 		if (ssl_ktls_flag)
 			SSL_set_options(ssl, SSL_OP_ENABLE_KTLS);
 
+		if (strcmp(CIPHER_NAME, "default")) {
+			if (SSL_set_cipher_list(ssl, CIPHER_NAME) != 1) {
+				perror("set cipher");
+				exit(EXIT_FAILURE);
+			}
+		}
+
 		if (SSL_connect(ssl) == -1) {
 			perror("ssl connect");
 			exit(EXIT_FAILURE);
@@ -549,6 +559,8 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 			perror("SSL failed");
 			exit(EXIT_FAILURE);
 		}
+
+		printf("The negotiated cipher is: %s\n", SSL_get_cipher_name(ssl));
 
 		printf("ktls send:%ld, ktls recv:%ld\n",
 			BIO_get_ktls_send(SSL_get_wbio(ssl)),
@@ -617,6 +629,13 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 
 		ssl = SSL_new(ctx);
 		SSL_set_fd(ssl, sockfd);
+
+		if (strcmp(CIPHER_NAME, "default")) {
+			if (SSL_set_cipher_list(ssl, CIPHER_NAME) != 1) {
+				perror("set cipher");
+				exit(EXIT_FAILURE);
+			}
+		}
 
 		if (SSL_accept(ssl) <= 0) {
 			perror("ssl accept");
