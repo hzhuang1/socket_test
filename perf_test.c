@@ -879,6 +879,7 @@ int do_ssl_fdata(send_cfg_t *cfg)
 	int ret;
 	struct stat st;
 
+	ssl_ktls_flag = 0;
 	cfg->fd = open(cfg->name, O_RDONLY);
 	if (cfg->fd < 0) {
 		perror("open");
