@@ -40,7 +40,6 @@
 #define DATA_FILE_NAME	"data_128.bin"
 
 #define CIPHER_NAME	"default"
-//#define CIPHER_NAME	"AES128-GCM-SHA256"
 
 //#define ONLY_ONE_MESSAGE	1	// one data message
 
@@ -56,6 +55,15 @@ typedef struct {
 	struct timespec start;
 	int payload_sz;
 } msg_t;
+
+typedef struct {
+	char *name;
+	char *cipher_name;
+	int fd;
+	unsigned char *src;
+	unsigned char *dst;
+	size_t len;
+} send_cfg_t;
 
 static int msg_count = 0;
 static int ssl_ktls_flag = 0;
@@ -408,8 +416,8 @@ void server_ssl_recv(SSL *ssl, void *dst, size_t len)
 	};
 }
 
-static void start_sock(client_t client_send, server_t server_recv, int file_fd,
-		       void *src, void *dst, size_t len)
+static void start_sock(client_t client_send, server_t server_recv,
+		       send_cfg_t *cfg)
 {
 	int fd[2];
 	int sockfd;
@@ -434,18 +442,18 @@ static void start_sock(client_t client_send, server_t server_recv, int file_fd,
 
 		get_time(&start);
 
-		memset(src, 0, len + sizeof(msg_t));
-		set_message_header(src, len, msg_count);
+		memset(cfg->src, 0, cfg->len + sizeof(msg_t));
+		set_message_header(cfg->src, cfg->len, msg_count);
 		/*
 		printf("src:\n");
 		dump_buffer_hex(src, len);
 		*/
 #ifdef ONLY_ONE_MESSAGE
-		client_send(fd[0], file_fd, src, len);
+		client_send(fd[0], cfg->fd, cfg->src, cfg->len);
 		msg_count++;
 #else
 		do {
-			client_send(fd[0], file_fd, src, len);
+			client_send(fd[0], cfg->fd, cfg->src, cfg->len);
 			msg_count++;
 			get_time(&end);
 			get_time_diff(start, end, &diff);
@@ -467,11 +475,11 @@ static void start_sock(client_t client_send, server_t server_recv, int file_fd,
 		}
 
 #ifdef ONLY_ONE_MESSAGE
-		server_recv(sockfd, dst, len);
+		server_recv(sockfd, cfg->dst, cfg->len);
 		printf("dst:\n");
-		dump_buffer_hex(dst, len + sizeof(msg_t));
+		dump_buffer_hex(cfg->dst, cfg->len + sizeof(msg_t));
 
-		msg = (msg_t *)dst;
+		msg = (msg_t *)cfg->dst;
 		if (memcmp(msg->cmd, STOP_MSG, MSG_HDR_LEN) == 0) {
 			if (cnt > msg->count) {
 				perror("wrong count");
@@ -482,10 +490,10 @@ static void start_sock(client_t client_send, server_t server_recv, int file_fd,
 		(void)diff;
 #else
 		while (1) {
-			memset(dst, 0, len + sizeof(msg_t));
-			server_recv(sockfd, dst, len);
+			memset(cfg->dst, 0, cfg->len + sizeof(msg_t));
+			server_recv(sockfd, cfg->dst, cfg->len);
 
-			msg = (msg_t *)dst;
+			msg = (msg_t *)cfg->dst;
 			if (memcmp(msg->cmd, STOP_MSG, MSG_HDR_LEN) == 0) {
 				if (cnt > msg->count) {
 					perror("wrong count");
@@ -506,7 +514,7 @@ static void start_sock(client_t client_send, server_t server_recv, int file_fd,
 			// msg->length indicates the length of stop message,
 			// not data message.
 			// Only calculate data payload size.
-			calc_perf(diff, msg->count, len);
+			calc_perf(diff, msg->count, cfg->len);
 		}
 #endif
 		close(sockfd);
@@ -516,7 +524,7 @@ static void start_sock(client_t client_send, server_t server_recv, int file_fd,
 }
 
 static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
-		      int file_fd, void *src, void *dst, size_t len)
+		      send_cfg_t *cfg)
 {
 	int fd[2];
 	int sockfd;
@@ -569,8 +577,8 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 		if (ssl_ktls_flag)
 			SSL_set_options(ssl, SSL_OP_ENABLE_KTLS);
 
-		if (strcmp(CIPHER_NAME, "default")) {
-			if (SSL_set_cipher_list(ssl, CIPHER_NAME) != 1) {
+		if (cfg->cipher_name && strcmp(CIPHER_NAME, cfg->cipher_name)) {
+			if (SSL_set_cipher_list(ssl, cfg->cipher_name) != 1) {
 				perror("set cipher");
 				exit(EXIT_FAILURE);
 			}
@@ -595,14 +603,14 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 
 		get_time(&start);
 
-		memset(src, 0, len + sizeof(msg_t));
-		set_message_header(src, len, msg_count);
+		memset(cfg->src, 0, cfg->len + sizeof(msg_t));
+		set_message_header(cfg->src, cfg->len, msg_count);
 #ifdef ONLY_ONE_MESSAGE
-		client_send(ssl, file_fd, src, len);
+		client_send(ssl, cfg->fd, cfg->src, cfg->len);
 		msg_count++;
 #else
 		do {
-			client_send(ssl, file_fd, src, len);
+			client_send(ssl, cfg->fd, cfg->src, cfg->len);
 			msg_count++;
 			get_time(&end);
 			get_time_diff(start, end, &diff);
@@ -659,8 +667,8 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 		ssl = SSL_new(ctx);
 		SSL_set_fd(ssl, sockfd);
 
-		if (strcmp(CIPHER_NAME, "default")) {
-			if (SSL_set_cipher_list(ssl, CIPHER_NAME) != 1) {
+		if (cfg->cipher_name && strcmp(CIPHER_NAME, cfg->cipher_name)) {
+			if (SSL_set_cipher_list(ssl, cfg->cipher_name) != 1) {
 				perror("set cipher");
 				exit(EXIT_FAILURE);
 			}
@@ -672,11 +680,11 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 		}
 
 #ifdef ONLY_ONE_MESSAGE
-		server_recv(ssl, dst, len);
+		server_recv(ssl, cfg->dst, cfg->len);
 		printf("dst:\n");
-		dump_buffer_hex(dst, len + sizeof(msg_t));
+		dump_buffer_hex(cfg->dst, cfg->len + sizeof(msg_t));
 
-		msg = (msg_t *)dst;
+		msg = (msg_t *)cfg->dst;
 		if (memcmp(msg->cmd, STOP_MSG, MSG_HDR_LEN) == 0) {
 			if (cnt > msg->count) {
 				perror("wrong count");
@@ -687,10 +695,10 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 		(void)diff;
 #else
 		while (1) {
-			memset(dst, 0, len + sizeof(msg_t));
-			server_recv(ssl, dst, len);
+			memset(cfg->dst, 0, cfg->len + sizeof(msg_t));
+			server_recv(ssl, cfg->dst, cfg->len);
 
-			msg = (msg_t *)dst;
+			msg = (msg_t *)cfg->dst;
 			if (memcmp(msg->cmd, STOP_MSG, MSG_HDR_LEN) == 0) {
 				if (cnt > msg->count) {
 					perror("wrong count");
@@ -711,7 +719,7 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 			// msg->length indicates the length of stop message,
 			// not data message.
 			// Only calculate data payload size.
-			calc_perf(diff, msg->count, len);
+			calc_perf(diff, msg->count, cfg->len);
 		}
 #endif
 		SSL_shutdown(ssl);
@@ -724,255 +732,275 @@ static void start_ssl(client_ssl_t client_send, server_ssl_t server_recv,
 	}
 }
 
-int do_sock_send(char *name)
+int do_sock_send(send_cfg_t *cfg)
 {
-	size_t msg_sz, len;
-	unsigned char *src, *dst;
-	int fd, ret;
+	size_t msg_sz;
+	int ret;
 	struct stat st;
 
-	fd = open(name, O_RDONLY);
-	if (fd < 0) {
+	cfg->fd = open(cfg->name, O_RDONLY);
+	if (cfg->fd < 0) {
 		perror("open");
 		exit(EXIT_FAILURE);
 	}
 
-	if (fstat(fd, &st) < 0) {
+	if (fstat(cfg->fd, &st) < 0) {
 		perror("fstat");
 		exit(EXIT_FAILURE);
 	}
-	len = st.st_size;
-	printf("Test to send with %ld size.\n", len);
-	close(fd);
+	cfg->len = st.st_size;
+	printf("Test to send with %ld size.\n", cfg->len);
+	close(cfg->fd);
 
-	msg_sz = len + sizeof(msg_t);
-	src = malloc(msg_sz);
-	if (src == NULL) {
+	msg_sz = cfg->len + sizeof(msg_t);
+	cfg->src = malloc(msg_sz);
+	if (cfg->src == NULL) {
 		perror("no memory for src");
 		ret = -ENOMEM;
 		goto out;
 	}
-	dst = malloc(msg_sz);
-	if (dst == NULL) {
+	cfg->dst = malloc(msg_sz);
+	if (cfg->dst == NULL) {
 		perror("no memory for dst");
 		ret = -ENOMEM;
 		goto out_dst;
 	}
-	if (RAND_bytes(src, msg_sz) <= 0) {
+	if (RAND_bytes(cfg->src, msg_sz) <= 0) {
 		perror("rand");
 		ret = -EINVAL;
 		goto out_rnd;
 	}
-	memset(dst, 0, msg_sz);
+	memset(cfg->dst, 0, msg_sz);
 	// fd isn't used at here
-	start_sock(client_sock_send, server_sock_recv, -1, src, dst, len);
-	free(dst);
-	free(src);
+	cfg->fd = -1;
+	start_sock(client_sock_send, server_sock_recv, cfg);
+	free(cfg->dst);
+	free(cfg->src);
 	return 0;
 out_rnd:
-	free(dst);
+	free(cfg->dst);
 out_dst:
-	free(src);
+	free(cfg->src);
 out:
 	return ret;
 }
 
-int do_sock_fdata(char *name)
+int do_sock_fdata(send_cfg_t *cfg)
 {
-	unsigned char *src, *dst;
-	size_t msg_sz, len;
-	int fd;
+	size_t msg_sz;
 	int ret;
 	struct stat st;
 
-	fd = open(name, O_RDONLY);
-	if (fd < 0) {
+	cfg->fd = open(cfg->name, O_RDONLY);
+	if (cfg->fd < 0) {
 		perror("open");
 		exit(EXIT_FAILURE);
 	}
 
-	if (fstat(fd, &st) < 0) {
+	if (fstat(cfg->fd, &st) < 0) {
 		perror("fstat");
 		exit(EXIT_FAILURE);
 	}
-	len = st.st_size;
-	printf("Test to send file with %ld size.\n", len);
+	cfg->len = st.st_size;
+	printf("Test to send file with %ld size.\n", cfg->len);
 
-	msg_sz = sizeof(msg_t) + len;
-	src = malloc(msg_sz);
-	if (src == NULL) {
+	msg_sz = sizeof(msg_t) + cfg->len;
+	cfg->src = malloc(msg_sz);
+	if (cfg->src == NULL) {
 		perror("no memory for src");
 		ret = -ENOMEM;
 		goto out;
 	}
-	dst = malloc(msg_sz);
-	if (dst == NULL) {
+	cfg->dst = malloc(msg_sz);
+	if (cfg->dst == NULL) {
 		perror("no memory for dst");
 		ret = -ENOMEM;
 		goto out_dst;
 	}
-	memset(dst, 0, msg_sz);
-	start_sock(client_sock_send_fdata, server_sock_recv, fd, src, dst, len);
-	close(fd);
-	free(dst);
-	free(src);
+	memset(cfg->dst, 0, msg_sz);
+	start_sock(client_sock_send_fdata, server_sock_recv, cfg);
+	close(cfg->fd);
+	free(cfg->dst);
+	free(cfg->src);
 	return 0;
 out_dst:
-	free(src);
+	free(cfg->src);
 out:
 	return ret;
 }
 
-int do_sock_file(char *name)
+int do_sock_file(send_cfg_t *cfg)
 {
-	unsigned char *src, *dst;
-	size_t msg_sz, len;
-	int fd;
+	size_t msg_sz;
 	int ret;
 	struct stat st;
 
-	fd = open(name, O_RDONLY);
-	if (fd < 0) {
+	cfg->fd = open(cfg->name, O_RDONLY);
+	if (cfg->fd < 0) {
 		perror("open");
 		exit(EXIT_FAILURE);
 	}
 
-	if (fstat(fd, &st) < 0) {
+	if (fstat(cfg->fd, &st) < 0) {
 		perror("fstat");
 		exit(EXIT_FAILURE);
 	}
-	len = st.st_size;
-	printf("Test to send file with %ld size.\n", len);
+	cfg->len = st.st_size;
+	printf("Test to send file with %ld size.\n", cfg->len);
 
-	msg_sz = sizeof(msg_t) + len;
-	src = malloc(msg_sz);
-	if (src == NULL) {
+	msg_sz = sizeof(msg_t) + cfg->len;
+	cfg->src = malloc(msg_sz);
+	if (cfg->src == NULL) {
 		perror("no memory for src");
 		ret = -ENOMEM;
 		goto out;
 	}
-	dst = malloc(msg_sz);
-	if (dst == NULL) {
+	cfg->dst = malloc(msg_sz);
+	if (cfg->dst == NULL) {
 		perror("no memory for dst");
 		ret = -ENOMEM;
 		goto out_dst;
 	}
-	memset(dst, 0, msg_sz);
-	start_sock(client_sock_send_file, server_sock_recv, fd, src, dst, len);
-	close(fd);
-	free(dst);
-	free(src);
+	memset(cfg->dst, 0, msg_sz);
+	start_sock(client_sock_send_file, server_sock_recv, cfg);
+	close(cfg->fd);
+	free(cfg->dst);
+	free(cfg->src);
 	return 0;
 out_dst:
-	free(src);
+	free(cfg->src);
 out:
 	return ret;
 }
 
-int do_ssl_fdata(char *name)
+int do_ssl_fdata(send_cfg_t *cfg)
 {
-	unsigned char *src, *dst;
-	size_t msg_sz, len;
-	int fd;
+	size_t msg_sz;
 	int ret;
 	struct stat st;
 
-	fd = open(name, O_RDONLY);
-	if (fd < 0) {
+	cfg->fd = open(cfg->name, O_RDONLY);
+	if (cfg->fd < 0) {
 		perror("open");
 		exit(EXIT_FAILURE);
 	}
 
-	if (fstat(fd, &st) < 0) {
+	if (fstat(cfg->fd, &st) < 0) {
 		perror("fstat");
 		exit(EXIT_FAILURE);
 	}
-	len = st.st_size;
-	printf("Test to send file with %ld size.\n", len);
+	cfg->len = st.st_size;
+	printf("Test to send file with %ld size.\n", cfg->len);
 
-	msg_sz = sizeof(msg_t) + len;
-	src = malloc(msg_sz);
-	if (src == NULL) {
+	msg_sz = sizeof(msg_t) + cfg->len;
+	cfg->src = malloc(msg_sz);
+	if (cfg->src == NULL) {
 		perror("no memory for src");
 		ret = -ENOMEM;
 		goto out;
 	}
-	dst = malloc(msg_sz);
-	if (dst == NULL) {
+	cfg->dst = malloc(msg_sz);
+	if (cfg->dst == NULL) {
 		perror("no memory for dst");
 		ret = -ENOMEM;
 		goto out_dst;
 	}
-	memset(dst, 0, msg_sz);
-	start_ssl(client_ssl_send_fdata, server_ssl_recv, fd, src, dst, len);
-	close(fd);
-	free(dst);
-	free(src);
+	memset(cfg->dst, 0, msg_sz);
+	start_ssl(client_ssl_send_fdata, server_ssl_recv, cfg);
+	close(cfg->fd);
+	free(cfg->dst);
+	free(cfg->src);
 	return 0;
 out_dst:
-	free(src);
+	free(cfg->src);
 out:
 	return ret;
 }
 
-int do_ssl_file(char *name)
+int do_ssl_file(send_cfg_t *cfg)
 {
-	unsigned char *src, *dst;
-	size_t msg_sz, len;
-	int fd;
+	size_t msg_sz;
 	int ret;
 	struct stat st;
 
 	ssl_ktls_flag = 1;
-	fd = open(name, O_RDONLY);
-	if (fd < 0) {
+	cfg->fd = open(cfg->name, O_RDONLY);
+	if (cfg->fd < 0) {
 		perror("open");
 		exit(EXIT_FAILURE);
 	}
 
-	if (fstat(fd, &st) < 0) {
+	if (fstat(cfg->fd, &st) < 0) {
 		perror("fstat");
 		exit(EXIT_FAILURE);
 	}
-	len = st.st_size;
-	printf("Test to send file with %ld size.\n", len);
+	cfg->len = st.st_size;
+	printf("Test to send file with %ld size.\n", cfg->len);
 
-	msg_sz = sizeof(msg_t) + len;
-	src = malloc(msg_sz);
-	if (src == NULL) {
+	msg_sz = sizeof(msg_t) + cfg->len;
+	cfg->src = malloc(msg_sz);
+	if (cfg->src == NULL) {
 		perror("no memory for src");
 		ret = -ENOMEM;
 		goto out;
 	}
-	dst = malloc(msg_sz);
-	if (dst == NULL) {
+	cfg->dst = malloc(msg_sz);
+	if (cfg->dst == NULL) {
 		perror("no memory for dst");
 		ret = -ENOMEM;
 		goto out_dst;
 	}
-	memset(dst, 0, msg_sz);
-	start_ssl(client_ssl_send_file, server_ssl_recv, fd, src, dst, len);
-	close(fd);
-	free(dst);
-	free(src);
+	memset(cfg->dst, 0, msg_sz);
+	start_ssl(client_ssl_send_file, server_ssl_recv, cfg);
+	close(cfg->fd);
+	free(cfg->dst);
+	free(cfg->src);
 	return 0;
 out_dst:
-	free(src);
+	free(cfg->src);
 out:
 	return ret;
 }
 
 int main(void)
 {
+	send_cfg_t config;
+
 	printf("sock send case:\n");
-	do_sock_send(DATA_FILE_NAME);
+	memset(&config, 0, sizeof(config));
+	config.name = strdup(DATA_FILE_NAME);
+	do_sock_send(&config);
+
 	printf("read file & send over socket:\n");
-	do_sock_fdata(DATA_FILE_NAME);
+	memset(&config, 0, sizeof(config));
+	config.name = strdup(DATA_FILE_NAME);
+	do_sock_fdata(&config);
+
 	printf("sendfile:\n");
-	do_sock_file(DATA_FILE_NAME);
-	printf("read file & send over SSL:\n");
-	do_ssl_fdata(DATA_FILE_NAME);
-	printf("sendfile over SSL:\n");
-	do_ssl_file(DATA_FILE_NAME);
+	memset(&config, 0, sizeof(config));
+	config.name = strdup(DATA_FILE_NAME);
+	do_sock_file(&config);
+
+	printf("read file & send over SSL with auto-negotiate cipher:\n");
+	memset(&config, 0, sizeof(config));
+	config.name = strdup(DATA_FILE_NAME);
+	do_ssl_fdata(&config);
+
+	printf("sendfile over SSL with auto-negotiate cipher:\n");
+	memset(&config, 0, sizeof(config));
+	config.name = strdup(DATA_FILE_NAME);
+	do_ssl_file(&config);
+
+	printf("read file & send over SSL with AES128-GCM-SHA256 cipher:\n");
+	memset(&config, 0, sizeof(config));
+	config.name = strdup(DATA_FILE_NAME);
+	config.cipher_name = strdup("AES128-GCM-SHA256");
+	do_ssl_fdata(&config);
+
+	printf("sendfile over SSL with AES128-GCM-SHA256 cipher:\n");
+	memset(&config, 0, sizeof(config));
+	config.name = strdup(DATA_FILE_NAME);
+	config.cipher_name = strdup("AES128-GCM-SHA256");
+	do_ssl_file(&config);
 	return 0;
 }
